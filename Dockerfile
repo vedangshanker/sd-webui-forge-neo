@@ -6,7 +6,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TINI_SUBREAPER=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
-    TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
+    TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 \
+    TORCH_COMMAND="pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

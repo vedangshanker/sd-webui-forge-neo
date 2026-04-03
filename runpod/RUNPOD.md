@@ -50,3 +50,4 @@ Optional model-specific toggles:
 - `CIVITAI_API_KEY` is intentionally not stored in the repo seed config.
 - The image build does not bake models into the image.
 - Your current Windows `venv` is not reused; the image rebuilds Python dependencies in Linux.
+- The image is pinned to CUDA 12.8 PyTorch wheels for broader Runpod driver compatibility than the fork's default CUDA 13.0 wheels.
