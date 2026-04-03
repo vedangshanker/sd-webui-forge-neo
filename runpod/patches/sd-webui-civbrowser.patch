@@ -1,0 +1,2249 @@
+diff --git a/scripts/civsfz_api.py b/scripts/civsfz_api.py
+index 26b49e5..6ff96d6 100644
+--- a/scripts/civsfz_api.py
++++ b/scripts/civsfz_api.py
+@@ -17,7 +17,7 @@ from scripts.civsfz_filemanage import (
+     filename_normalization,
+ )
+ from scripts.civsfz_color import dictBasemodelColors
+-from scripts.civsfz_shared import GR_V440, opts, read_timeout, card_no_preview
++from scripts.civsfz_shared import GR_V440, opts, read_timeout, card_no_preview, get_civitai_api_key
+ from jinja2 import Environment, FileSystemLoader
+ 
+ print_ly = lambda  x: print(Fore.LIGHTYELLOW_EX + "CivBrowser: " + x + Style.RESET_ALL )
+@@ -1458,8 +1458,8 @@ class CivitaiModels(APIInformation):
+             # with CachedSession(cache_name=cachePath.resolve(), expire_after=5*60) as session:
+             browse = Browser()
+             if hasFavorites:
+-                api_key=getattr(opts,"civsfz_api_key", None)
+-                if api_key is None:
++                api_key = get_civitai_api_key()
++                if not api_key:
+                     print_ly(f"No API Key.")
+                 else:
+                     browse.setAPIKey(api_key)
+diff --git a/scripts/civsfz_downloader.py b/scripts/civsfz_downloader.py
+index 85fcedb..c5ed244 100644
+--- a/scripts/civsfz_downloader.py
++++ b/scripts/civsfz_downloader.py
+@@ -8,7 +8,7 @@ from collections import deque
+ from datetime import datetime, timedelta, timezone
+ from jinja2 import Environment, FileSystemLoader
+ from pathlib import Path
+-from threading import Thread, local
++from threading import Lock, Thread, local
+ from time import sleep
+ from tqdm import tqdm
+ from scripts.civsfz_shared import opts, calculate_sha256, read_timeout
+@@ -18,6 +18,7 @@ from scripts.civsfz_filemanage import (
+     extensionFolder,
+     open_folder,
+     filename_normalization,
++    type_path,
+ )
+ 
+ def print_ly(x): return print(Fore.LIGHTYELLOW_EX +
+@@ -35,6 +36,7 @@ class Downloader:
+     _dlResults = deque() # Download results
+     _maxThreadNum = 2
+     _threadNum = 0
++    _refresh_lock = Lock()
+ 
+     def __init__(self) -> None:
+         Downloader._thread_local.progress = 0
+@@ -149,6 +151,61 @@ class Downloader:
+             outputs=[],
+         )
+ 
++    @staticmethod
++    def _path_in_directory(path: Path, directory: Path) -> bool:
++        try:
++            path_abs = os.path.normcase(os.path.abspath(path))
++            dir_abs = os.path.normcase(os.path.abspath(directory))
++        except OSError:
++            return False
++
++        return path_abs == dir_abs or path_abs.startswith(dir_abs + os.sep)
++
++    def refresh_webui_state(self, file_path: Path):
++        refreshes = []
++
++        with Downloader._refresh_lock:
++            try:
++                if self._path_in_directory(file_path, type_path("Checkpoint")):
++                    from modules import shared
++
++                    shared.refresh_checkpoints()
++                    refreshes.append("checkpoints")
++
++                elif self._path_in_directory(file_path, type_path("VAE")):
++                    from modules import shared_items
++
++                    shared_items.refresh_vae_list()
++                    refreshes.append("vae")
++
++                elif any(
++                    self._path_in_directory(file_path, type_path(model_type))
++                    for model_type in ("LORA", "LoCon", "DoRA")
++                ):
++                    import networks
++
++                    networks.list_available_networks()
++                    refreshes.append("lora")
++
++                elif self._path_in_directory(file_path, type_path("Hypernetwork")):
++                    from modules import shared
++
++                    shared.reload_hypernetworks()
++                    refreshes.append("hypernetworks")
++
++                elif self._path_in_directory(file_path, type_path("TextualInversion")):
++                    from modules.sd_hijack import model_hijack
++
++                    model_hijack.embedding_db.load_textual_inversion_embeddings(force_reload=True)
++                    refreshes.append("embeddings")
++            except Exception as exc:
++                print_ly(f"Refresh failed for {file_path.name}: {exc}")
++
++        if refreshes:
++            print_lc(
++                f"Refreshed WebUI indexes after download: {', '.join(refreshes)}"
++            )
++
+     def download(self) -> None:
+         session = self.get_session()
+         result = "" # Success or Error
+@@ -310,6 +367,8 @@ class Downloader:
+                         print_ly("No hash value provided. Unable to confirm file.")
+                         result = "No hash value"
+                         # gr.Info(f"No hash: {file_name_display}")
++
++                    self.refresh_webui_state(Path(file_name))
+             # Downloader._dlQ.task_done()
+             Downloader._threadQ.remove(q)
+             q['result'] = result
+diff --git a/scripts/civsfz_settings.py b/scripts/civsfz_settings.py
+index cc7776c..fcdb27a 100644
+--- a/scripts/civsfz_settings.py
++++ b/scripts/civsfz_settings.py
+@@ -49,7 +49,8 @@ def on_ui_settings():
+                 "The command line option `<em>--civsfz-api-key</em>` is deprecated. "
+                 "We felt that this was a risk because some users might not notice the API-Key being displayed on the console. "
+                 "The API-Key here is saved in the `<em>config.json</em>` file.</br>"
+-                "If you do not know this, there is a risk of your API-Key being leaked."
++                "If you do not know this, there is a risk of your API-Key being leaked.</br>"
++                "If you want to avoid saving it, set the environment variable `<em>CIVITAI_API_KEY</em>` before launch."
+             ),
+         }
+         if not platform == "SD.Next"
+@@ -62,7 +63,7 @@ def on_ui_settings():
+             label="API-Key",
+             component=gr.Textbox,
+             component_args={"type": "password"},
+-        ).info("Note: API-Key is stored in the `config.json` file."),
++        ).info("Note: API-Key is stored in the `config.json` file. If `CIVITAI_API_KEY` is set, it is used automatically."),
+         "civsfz_request_timeout": shared.OptionInfo(
+             30,
+             label="Request timeout(s)",
+@@ -84,25 +85,25 @@ def on_ui_settings():
+             component_args={"minimum": 1, "maximum": 8, "step": 1},
+         ).needs_reload_ui(),
+         "civsfz_number_of_cards": shared.OptionInfo(
+-            12,
++            100,
+             label="Number of cards per page",
+             component=gr.Slider,
+-            component_args={"minimum": 8, "maximum": 48, "step": 1},
+-        ),
++            component_args={"minimum": 8, "maximum": 100, "step": 1},
++        ).info("CivitAI's current models API accepts up to 100 results per request."),
+         "civsfz_card_size_width": shared.OptionInfo(
+-            8,
++            7,
+             label="Card width (unit:1em)",
+             component=gr.Slider,
+             component_args={"minimum": 5, "maximum": 30, "step": 1},
+         ),
+         "civsfz_card_size_height": shared.OptionInfo(
+-            12,
++            10,
+             label="Card height (unit:1em)",
+             component=gr.Slider,
+             component_args={"minimum": 5, "maximum": 30, "step": 1},
+         ),
+         "civsfz_hover_zoom_magnification": shared.OptionInfo(
+-            1.5,
++            1.08,
+             label="Zoom magnification when hovering",
+             component=gr.Slider,
+             component_args={"minimum": 1, "maximum": 2.4, "step": 0.1},
+diff --git a/scripts/civsfz_shared.py b/scripts/civsfz_shared.py
+index d9660fd..949bf93 100644
+--- a/scripts/civsfz_shared.py
++++ b/scripts/civsfz_shared.py
+@@ -1,3 +1,5 @@
++import os
++
+ VERSION = "v2.13.1"
+ 
+ platform = "A1111"
+@@ -65,6 +67,22 @@ except ImportError:
+ def read_timeout():
+     return 15, getattr(opts, "civsfz_request_timeout", 30)
+ 
++
++def get_civitai_api_key(runtime_value=None):
++    for candidate in (
++        runtime_value,
++        os.environ.get("CIVITAI_API_KEY"),
++        getattr(opts, "civsfz_api_key", ""),
++    ):
++        if candidate is None:
++            continue
++
++        api_key = str(candidate).strip()
++        if api_key:
++            return api_key[:32]
++
++    return ""
++
+ class HTML2txt(HTMLParser):
+     text = ""
+     prevEndTag = ""
+diff --git a/scripts/civsfz_ui.py b/scripts/civsfz_ui.py
+index 84d2d60..0398295 100644
+--- a/scripts/civsfz_ui.py
++++ b/scripts/civsfz_ui.py
+@@ -7,7 +7,7 @@ import re
+ from datetime import datetime, timedelta, timezone
+ from modules import script_callbacks, ui_components
+ from colorama import Fore, Back, Style
+-from scripts.civsfz_shared import VERSION, GR_V440, cmd_opts, opts, read_timeout, HTML2txt
++from scripts.civsfz_shared import VERSION, GR_V440, cmd_opts, opts, read_timeout, HTML2txt, get_civitai_api_key
+ from scripts.civsfz_api import CivitaiModels
+ from scripts.civsfz_filemanage import (
+     open_folder,
+@@ -43,41 +43,39 @@ class Components():
+         self.Civitai = CivitaiModels(tabId=self.id)
+         self.searchtype:list[str] = ["No"] # Remember previous search type
+         contentTypes = self.Civitai.getTypeOptions()
+-        self.APIKey = ""
+-        if opts.civsfz_api_key:
+-            self.APIKey = opts.civsfz_api_key[0:32]
++        self.APIKey = get_civitai_api_key()
+         def defaultContentType():
+             value = contentTypes[self.id % len(contentTypes)]
+             return value
+         def defaultPeriod():
+             return "Month"
+ 
+-        grHtmlAnchorNav = self.compAnchorNav()
+-        with gr.Column() as self.components:
+-            with gr.Row():
+-                with gr.Column(scale=1):
+-                    grChkbxGrpContentType = gr.CheckboxGroup(
+-                        label='Types:', choices=contentTypes, value=defaultContentType)
+-                with gr.Column(scale=1):
+-                    with gr.Row():
+-                        grDrpdwnSortType = gr.Dropdown(
+-                            label='Sort List by:', choices=self.Civitai.getSortOptions(), value="Newest", type="value")
+-                        with gr.Accordion(label="Sensitive", open=False):
+-                            grChkboxShowNsfw = gr.Checkbox(
+-                                label="nsfw", info="WARNING", value=False)
+-                    with gr.Row():
+-                        grDrpdwnPeriod = gr.Dropdown(label='Period', choices=self.Civitai.getPeriodOptions(
+-                        ), value=defaultPeriod, type="value")
+-                        grDrpdwnBasemodels = gr.Dropdown(label="Base Models", choices=self.Civitai.getBasemodelOptions(
+-                        ), value=None, type="value", multiselect=True)
+-                    with gr.Row():
+-                        grDrpdwnCHistory = gr.Dropdown(
+-                            elem_id=f"civsfz_conditions_history{self.id}",
+-                            label="Conditions History",
+-                            choices=HistoryC.getAsChoices(),
+-                            type="value",
+-                            tooltip="You can choose search conditions from your history",
+-                        )
++        with gr.Column(elem_classes="civsfz-browser-shell") as self.components:
++            with gr.Group(elem_classes="civsfz-search-shell"):
++                with gr.Row(elem_classes="civsfz-search-top"):
++                    with gr.Column(scale=1, elem_classes="civsfz-search-types"):
++                        grChkbxGrpContentType = gr.CheckboxGroup(
++                            label='Types:', choices=contentTypes, value=defaultContentType)
++                    with gr.Column(scale=1, elem_classes="civsfz-search-filters"):
++                        with gr.Row(elem_classes="civsfz-filter-row"):
++                            grDrpdwnSortType = gr.Dropdown(
++                                label='Sort List by:', choices=self.Civitai.getSortOptions(), value="Newest", type="value")
++                            with gr.Accordion(label="Sensitive", open=False, elem_classes="civsfz-sensitive-accordion"):
++                                grChkboxShowNsfw = gr.Checkbox(
++                                    label="nsfw", info="WARNING", value=False)
++                        with gr.Row(elem_classes="civsfz-filter-row"):
++                            grDrpdwnPeriod = gr.Dropdown(label='Period', choices=self.Civitai.getPeriodOptions(
++                            ), value=defaultPeriod, type="value")
++                            grDrpdwnBasemodels = gr.Dropdown(label="Base Models", choices=self.Civitai.getBasemodelOptions(
++                            ), value=None, type="value", multiselect=True)
++                        with gr.Row(elem_classes="civsfz-filter-row"):
++                            grDrpdwnCHistory = gr.Dropdown(
++                                elem_id=f"civsfz_conditions_history{self.id}",
++                                label="Conditions History",
++                                choices=HistoryC.getAsChoices(),
++                                type="value",
++                                tooltip="You can choose search conditions from your history",
++                            )
+ 
+             # with gr.Row():  # deprecated
+             #    grRadioSearchType = gr.Radio(scale=2, label="Search", choices=self.Civitai.getSearchTypes(),value="No")
+@@ -91,252 +89,262 @@ class Components():
+             #        allow_custom_value=True,
+             #        tooltip="Enter your search term or choose from your history and favorites",
+             #    )
+-            with gr.Row():
+-                grChkbxgrpSearch = gr.CheckboxGroup(
+-                    scale=3,
+-                    label="Search (Keyword:Spaces as OR-search, double‑quotes as a phrase)",
++                with gr.Row(elem_classes="civsfz-search-mode-row"):
++                    grChkbxgrpSearch = gr.CheckboxGroup(
++                        scale=3,
++                        label="Search (Keyword:Spaces as OR-search, double‑quotes as a phrase)",
+                     choices=self.Civitai.getSearchTypes(),
+                     value=self.searchtype,
+                     interactive=True,
+                     elem_id=f"civsfz_search_type{self.id}",
+                     tooltip="Keyword, username and tag can be searched simultaneously",
+                 )
+-                grchkbxfav = gr.Checkbox(
+-                    scale=1,
+-                    label="Liked on Civitai",
++                    grchkbxfav = gr.Checkbox(
++                        scale=1,
++                        label="Liked on Civitai",
+                     value=False,
+-                    elem_id=f"civsfz_search_liked{self.id}",
+-                    tooltip="Search for models liked on civitai",
+-                )
+-            with gr.Row():
+-                grDrpdwnKeyword = gr.Dropdown(
+-                    scale=0,
+-                    label="Keyword",
+-                    choices=HistoryKwd.getAsChoices("Keyword"),
+-                    type="value",
+-                    visible=False,
+-                    allow_custom_value=True,
+-                    elem_id=f"civsfz_search_keyword{self.id}",
+-                    tooltip="Enter a search term or choose from your history",
+-                )
+-                grDrpdwnUserName = gr.Dropdown(
+-                    scale=0,
+-                    label="User Name",
+-                    choices=HistoryKwd.getAsChoices("User name"),
+-                    type="value",
+-                    visible=False,
+-                    allow_custom_value=True,
+-                    elem_id=f"civsfz_search_user{self.id}",
+-                    tooltip="Enter a user name or choose from your history and favorites",
+-                )
+-                grDrpdwnTag = gr.Dropdown(
+-                    scale=0,
+-                    label="Tag",
+-                    choices=HistoryKwd.getAsChoices("Tag"),
+-                    type="value",
+-                    visible=False,
+-                    allow_custom_value=True,
+-                    elem_id=f"civsfz_search_tag{self.id}",
+-                    tooltip="Enter a tag or choose from your history",
+-                )
+-                grDrpdwnID = gr.Dropdown(
+-                    scale=0,
+-                    label="ID/Hash",
+-                    choices=HistoryKwd.getAsChoices("ID"),
+-                    type="value",
+-                    visible=False,
+-                    allow_custom_value=True,
+-                    elem_id=f"civsfz_search_id{self.id}",
+-                    tooltip="Enter the number or choose from your history",
+-                )
+-
+-            with gr.Column(elem_id=f"civsfz_model-navigation{self.id}"):
+-                with gr.Row(elem_id=f"civsfz_apicontrol{self.id}", elem_classes="civsfz-navigation-buttons civsfz-sticky-element"):
+-                    with gr.Column(scale=3):
+-                        grBtnGetListAPI = gr.Button(
+-                            value="GET cards",
+-                            elem_id=f"civsfz_get_cards{self.id}",
+-                            tooltip="Get model list and display as model cards",
+-                        )
+-                    with gr.Column(scale=2,min_width=80):
+-                        grBtnPrevPage = gr.Button(
+-                            value="PREV",
+-                            elem_id=f"civsfz_previous_page{self.id}",
+-                            tooltip="Previous page",
+-                            interactive=False,
+-                        )
+-                    with gr.Column(scale=2,min_width=80):
+-                        grBtnNextPage = gr.Button(
+-                            value="NEXT",
+-                            elem_id=f"civsfz_next_page{self.id}",
+-                            tooltip="Next page",
+-                            interactive=False,
+-                        )
+-                    with gr.Column(scale=1,min_width=80):
+-                        grTxtPages = gr.Textbox(label='Pages',show_label=False)
+-                with gr.Row():
+-                    grHtmlCards = gr.HTML()
+-                    grTxtProperties = gr.Textbox(elem_id="civsfz_css-properties", label="CSS Properties", value="", visible=False, interactive=False, lines=1)
+-                with gr.Row(elem_classes="civsfz-jump-page-control civsfz-sticky-element"):
+-                    with gr.Column(scale=3):
+-                        grSldrPage = gr.Slider(label="Page", minimum=1, maximum=10,value = 1, step=1, interactive=False, scale=3)
+-                    with gr.Column(scale=1,min_width=80):
+-                        grBtnGoPage = gr.Button(
+-                            value="JUMP",
+-                            elem_id=f"civsfz_jump_page{self.id}",
+-                            interactive=False,
+-                            scale=1,
+-                            tooltip="Jump to the specified page. Can also be used to reload.",
+-                        )
+-                    with gr.Accordion(label="Browsing Level", open=False):
+-                        with gr.Column(min_width=80):
+-                            grChkbxgrpLevel = gr.CheckboxGroup(label='Browsing Level', choices=list(self.Civitai.nsfwLevel.items()) ,value=opts.civsfz_browsing_level, interactive=True, show_label=False)
++                        elem_id=f"civsfz_search_liked{self.id}",
++                        tooltip="Search for models liked on civitai",
++                    )
++                with gr.Row(elem_classes="civsfz-search-input-row"):
++                    grDrpdwnKeyword = gr.Dropdown(
++                        scale=0,
++                        label="Keyword",
++                        choices=HistoryKwd.getAsChoices("Keyword"),
++                        type="value",
++                        visible=False,
++                        allow_custom_value=True,
++                        elem_id=f"civsfz_search_keyword{self.id}",
++                        tooltip="Enter a search term or choose from your history",
++                    )
++                    grDrpdwnUserName = gr.Dropdown(
++                        scale=0,
++                        label="User Name",
++                        choices=HistoryKwd.getAsChoices("User name"),
++                        type="value",
++                        visible=False,
++                        allow_custom_value=True,
++                        elem_id=f"civsfz_search_user{self.id}",
++                        tooltip="Enter a user name or choose from your history and favorites",
++                    )
++                    grDrpdwnTag = gr.Dropdown(
++                        scale=0,
++                        label="Tag",
++                        choices=HistoryKwd.getAsChoices("Tag"),
++                        type="value",
++                        visible=False,
++                        allow_custom_value=True,
++                        elem_id=f"civsfz_search_tag{self.id}",
++                        tooltip="Enter a tag or choose from your history",
++                    )
++                    grDrpdwnID = gr.Dropdown(
++                        scale=0,
++                        label="ID/Hash",
++                        choices=HistoryKwd.getAsChoices("ID"),
++                        type="value",
++                        visible=False,
++                        allow_custom_value=True,
++                        elem_id=f"civsfz_search_id{self.id}",
++                        tooltip="Enter the number or choose from your history",
++                    )
+ 
+-            with gr.Column(elem_id=f"civsfz_model-data{self.id}"):
+-                with gr.Row():
+-                    grHtmlModelName = gr.HTML(elem_id=f"civsfz_modellist{self.id}", value=None, visible=True)
+-                with gr.Row(elem_classes="civsfz-save-buttons civsfz-sticky-element"):
+-                    with gr.Column(scale=2):
+-                        with gr.Row():
+-                            # grBtnSaveText = gr.Button(value="Save trained tags",interactive=False, min_width=80)
+-                            grBtnSaveImages = gr.Button(
+-                                value="Save model infos",
+-                                elem_id=f"civsfz_save_images{self.id}",
+-                                tooltip="Save model information. Model file is not saved.",
+-                                interactive=False,
+-                                min_width=80,
+-                            )
+-                            grBtnDownloadModel = gr.Button(
+-                                value="Download model",
+-                                elem_id=f"civsfz_downloadbutton{self.id}",
+-                                tooltip="Save model file",
+-                                interactive=False,
+-                                min_width=80,
+-                            )
+-                    with gr.Column(scale=1):
+-                        with gr.Row():
+-                            grTextProgress = gr.Textbox(
+-                                label="Download status", show_label=False
++            with gr.Row(elem_classes="civsfz-workspace"):
++                with gr.Column(elem_id=f"civsfz_model-navigation{self.id}", elem_classes="civsfz-gallery-pane"):
++                    with gr.Row(elem_id=f"civsfz_apicontrol{self.id}", elem_classes="civsfz-navigation-buttons civsfz-sticky-element"):
++                        with gr.Column(scale=3):
++                            grBtnGetListAPI = gr.Button(
++                                value="Load models",
++                                elem_id=f"civsfz_get_cards{self.id}",
++                                elem_classes="civsfz-btn civsfz-btn-primary",
++                                tooltip="Get model list and display as model cards",
+                             )
+-                            # deprecated grBtnCancel = gr.Button(value="Cancel",interactive=False, variant='stop', min_width=80)
+-                with gr.Row():
+-                    with gr.Accordion(
+-                        label="User Management",
+-                        open=False,
+-                    ):
+-                        with gr.Row():
+-                            grTxtCreator = gr.Textbox(
+-                                label="Creator name",
+-                                value="",
+-                                visible=True,
+-                            )
+-                            grBtnAddFavorite = ui_components.ToolButton(
+-                                "⭐️",
+-                                elem_id=f"civsfz_user_manager_favorite{self.id}",
++                        with gr.Column(scale=2,min_width=96):
++                            grBtnPrevPage = gr.Button(
++                                value="Previous",
++                                elem_id=f"civsfz_previous_page{self.id}",
++                                elem_classes="civsfz-btn civsfz-btn-secondary",
++                                tooltip="Previous page",
+                                 interactive=False,
+-                                tooltip="Add creator to favorites",
+                             )
+-                            grBtnAddBan = ui_components.ToolButton(
+-                                "🚷",
+-                                elem_id=f"civsfz_user_manager_ban{self.id}",
++                        with gr.Column(scale=2,min_width=96):
++                            grBtnNextPage = gr.Button(
++                                value="Next",
++                                elem_id=f"civsfz_next_page{self.id}",
++                                elem_classes="civsfz-btn civsfz-btn-secondary",
++                                tooltip="Next page",
+                                 interactive=False,
+-                                tooltip="Add creator to ban",
+                             )
+-                            grBtnClearUser = ui_components.ToolButton(
+-                                "↻",
+-                                elem_id=f"civsfz_user_manager_clear{self.id}",
++                        with gr.Column(scale=1,min_width=88):
++                            grTxtPages = gr.Textbox(label='Pages',show_label=False, elem_classes="civsfz-pages-pill")
++                    with gr.Row(elem_classes="civsfz-card-grid-row"):
++                        grHtmlCards = gr.HTML(elem_classes="civsfz-card-grid-host")
++                        grTxtProperties = gr.Textbox(elem_id="civsfz_css-properties", label="CSS Properties", value="", visible=False, interactive=False, lines=1)
++                    with gr.Row(elem_classes="civsfz-jump-page-control civsfz-sticky-element civsfz-jump-grid"):
++                        with gr.Column(scale=3):
++                            grSldrPage = gr.Slider(label="Page", minimum=1, maximum=10,value = 1, step=1, interactive=False, scale=3, elem_classes="civsfz-page-slider")
++                        with gr.Column(scale=1,min_width=96):
++                            grBtnGoPage = gr.Button(
++                                value="Go",
++                                elem_id=f"civsfz_jump_page{self.id}",
++                                elem_classes="civsfz-btn civsfz-btn-accent",
+                                 interactive=False,
+-                                tooltip="Remove creator status",
++                                scale=1,
++                                tooltip="Jump to the specified page. Can also be used to reload.",
+                             )
+-                    grTxtJsEvent = gr.Textbox(
+-                        label="Event text",
+-                        value=None,
+-                        elem_id=f"civsfz_eventtext{self.id}",
+-                        visible=False,
+-                        interactive=True,
+-                        lines=1,
+-                    )
+-                    # txt_list = ""
+-                    # grTxtTrainedWords = gr.Textbox(
+-                    #    label="Trained Tags (if any)",
+-                    #    value=f"{txt_list}",
+-                    #    interactive=False,
+-                    #    lines=1,
+-                    #    visible=False,
+-                    # )
+-                with gr.Row():
+-                    grRadioVersions = gr.Radio(
+-                        label="Version",
+-                        choices=[],
+-                        interactive=True,
+-                        elem_id=f"civsfz_versionlist{self.id}",
+-                        value=None,
+-                    )
+-                with gr.Row():
+-                    grTxtBaseModel = gr.Textbox(scale=1, label='Base Model', value='', interactive=True, lines=1, visible=False)
+-                    if GR_V440:
+-                        grDrpdwnSelectFile = gr.Dropdown(scale=3, label="File select", choices=[], type="index", interactive=True, value=None)
+-                    else:
+-                        grDrpdwnSelectFile = gr.Dropdown(scale=3, label="File select", choices=[], interactive=True, value=None)
+-                with gr.Row(equal_height=False):
+-                    # grBtnFolder = gr.Button(value="\N{Open file folder}", interactive=True, elem_classes="civsfz-small-buttons")  # 📂
+-                    grBtnFolder = ui_components.ToolButton(value="\N{Open file folder}",elem_id=f"civsfz_open_save_folder{self.id}", tooltip="Open save folder")  # 📂
+-                    grTxtSaveFolder = gr.Textbox(
+-                        label="Save folder",
+-                        elem_id=f"civsfz_save_folder{self.id}",
+-                        tooltip="Folder path to save the model. Editable.",
+-                        interactive=True,
+-                        value="",
+-                        lines=1,
+-                    )
+-                    grMrkdwnFileMessage = gr.HTML(value="You have", elem_classes ="civsfz-msg", visible=False)
+-                    grTxtSaveFilename = gr.Textbox(
+-                        label="Save file name",
+-                        elem_id=f"civsfz_save_file_name{self.id}",
+-                        tooltip="File name of model file to save. Editable.",
+-                        interactive=True,
+-                        value=None,
+-                    )
+-                with gr.Row():
+-                    grTxtDlUrl = gr.Textbox(label="Download Url", interactive=False, value=None)
+-                    grTxtEarlyAccess = gr.Textbox(label='Early Access', interactive=False, value=None, visible=False)
+-                    grTxtHash = gr.Textbox(label="File hash", interactive=False, value="", visible=False)
+-                    grTxtApiKey = gr.Textbox(
+-                        label="API Key",
+-                        elem_id=f"civsfz_api_key{self.id}",
+-                        tooltip="Enter API key obtained from CivitAI. You can also enter it in Settings.",
+-                        value=lambda: self.APIKey,
+-                        type="password",
+-                        lines=1,
+-                    )
+-                with gr.Row():
+-                    # grBtnCopyWords = gr.Button(value="📋", interactive=True, elem_classes="civsfz-small-buttons", visible=False)
+-                    grBtnCopyWords = ui_components.ToolButton(
+-                        value="📋",
+-                        interactive=True,
+-                        visible=False,
+-                        elem_id=f"civsfz_copy_triggerwords{self.id}",
+-                        tooltip="Copy trigger words",
++                        with gr.Accordion(label="Browsing Level", open=False, elem_classes="civsfz-browsing-level"):
++                            with gr.Column(min_width=80):
++                                grChkbxgrpLevel = gr.CheckboxGroup(label='Browsing Level', choices=list(self.Civitai.nsfwLevel.items()) ,value=opts.civsfz_browsing_level, interactive=True, show_label=False)
++
++                with gr.Column(elem_id=f"civsfz_model-data{self.id}", elem_classes="civsfz-detail-pane"):
++                    with gr.Row(elem_classes="civsfz-anchor-shell civsfz-sticky-element"):
++                        grHtmlAnchorNav = self.compAnchorNav()
++                    with gr.Row(elem_classes="civsfz-detail-title-row"):
++                        grHtmlModelName = gr.HTML(elem_id=f"civsfz_modellist{self.id}", value=None, visible=True)
++                    with gr.Row(elem_classes="civsfz-save-buttons civsfz-sticky-element civsfz-save-grid"):
++                        with gr.Column(scale=2):
++                            with gr.Row(elem_classes="civsfz-action-button-row"):
++                                # grBtnSaveText = gr.Button(value="Save trained tags",interactive=False, min_width=80)
++                                grBtnSaveImages = gr.Button(
++                                    value="Save model infos",
++                                    elem_id=f"civsfz_save_images{self.id}",
++                                    elem_classes="civsfz-btn civsfz-btn-secondary",
++                                    tooltip="Save model information. Model file is not saved.",
++                                    interactive=False,
++                                    min_width=80,
++                                )
++                                grBtnDownloadModel = gr.Button(
++                                    value="Download model",
++                                    elem_id=f"civsfz_downloadbutton{self.id}",
++                                    elem_classes="civsfz-btn civsfz-btn-primary",
++                                    tooltip="Save model file",
++                                    interactive=False,
++                                    min_width=80,
++                                )
++                        with gr.Column(scale=1):
++                            with gr.Row(elem_classes="civsfz-status-row"):
++                                grTextProgress = gr.Textbox(
++                                    label="Download status", show_label=False, elem_classes="civsfz-download-status"
++                                )
++                                # deprecated grBtnCancel = gr.Button(value="Cancel",interactive=False, variant='stop', min_width=80)
++                    with gr.Row(elem_classes="civsfz-user-management-row"):
++                        with gr.Accordion(
++                            label="User Management",
++                            open=False,
++                            elem_classes="civsfz-user-management",
++                        ):
++                            with gr.Row(elem_classes="civsfz-user-management-controls"):
++                                grTxtCreator = gr.Textbox(
++                                    label="Creator name",
++                                    value="",
++                                    visible=True,
++                                )
++                                grBtnAddFavorite = ui_components.ToolButton(
++                                    "⭐️",
++                                    elem_id=f"civsfz_user_manager_favorite{self.id}",
++                                    interactive=False,
++                                    tooltip="Add creator to favorites",
++                                )
++                                grBtnAddBan = ui_components.ToolButton(
++                                    "🚷",
++                                    elem_id=f"civsfz_user_manager_ban{self.id}",
++                                    interactive=False,
++                                    tooltip="Add creator to ban",
++                                )
++                                grBtnClearUser = ui_components.ToolButton(
++                                    "↻",
++                                    elem_id=f"civsfz_user_manager_clear{self.id}",
++                                    interactive=False,
++                                    tooltip="Remove creator status",
++                                )
++                        grTxtJsEvent = gr.Textbox(
++                            label="Event text",
++                            value=None,
++                            elem_id=f"civsfz_eventtext{self.id}",
++                            visible=False,
++                            interactive=True,
++                            lines=1,
+                         )
+-                    # grBtnSendWords = gr.Button(value="📝", interactive=True, elem_classes="civsfz-small-buttons", visible=False)
+-                    grBtnSendWords = ui_components.ToolButton(
+-                        value="📝",
+-                        interactive=True,
+-                        visible=False,
+-                        elem_id=f"civsfz_send_triggerwords{self.id}",
+-                        tooltip="Send trigger words to txt2img",
++                        # txt_list = ""
++                        # grTxtTrainedWords = gr.Textbox(
++                        #    label="Trained Tags (if any)",
++                        #    value=f"{txt_list}",
++                        #    interactive=False,
++                        #    lines=1,
++                        #    visible=False,
++                        # )
++                    with gr.Row(elem_classes="civsfz-version-row"):
++                        grRadioVersions = gr.Radio(
++                            label="Version",
++                            choices=[],
++                            interactive=True,
++                            elem_id=f"civsfz_versionlist{self.id}",
++                            value=None,
+                         )
+-                    grTxtLoraPrompt = gr.Textbox(
+-                        label="Prompt to activate the model",
+-                        elem_id=f"civsfz_lora_prompt{self.id}",
+-                        tooltip="A prompt to call a model configured from Trained Tags",
+-                        interactive=True,
+-                        value=None,
+-                        visible=False,
+-                    )
+-                with gr.Row():
+-                    grTxtVersionInfo = gr.Textbox(label="Version base model",value="",visible=False)
+-                    grHtmlModelInfo = gr.HTML(elem_id=f"civsfz_model-info{self.id}")
++                    with gr.Row(elem_classes="civsfz-file-row"):
++                        grTxtBaseModel = gr.Textbox(scale=1, label='Base Model', value='', interactive=True, lines=1, visible=False)
++                        if GR_V440:
++                            grDrpdwnSelectFile = gr.Dropdown(scale=3, label="File select", choices=[], type="index", interactive=True, value=None)
++                        else:
++                            grDrpdwnSelectFile = gr.Dropdown(scale=3, label="File select", choices=[], interactive=True, value=None)
++                    with gr.Row(equal_height=False, elem_classes="civsfz-save-path-row"):
++                        # grBtnFolder = gr.Button(value="\N{Open file folder}", interactive=True, elem_classes="civsfz-small-buttons")  # 📂
++                        grBtnFolder = ui_components.ToolButton(value="\N{Open file folder}",elem_id=f"civsfz_open_save_folder{self.id}", tooltip="Open save folder")  # 📂
++                        grTxtSaveFolder = gr.Textbox(
++                            label="Save folder",
++                            elem_id=f"civsfz_save_folder{self.id}",
++                            tooltip="Folder path to save the model. Editable.",
++                            interactive=True,
++                            value="",
++                            lines=1,
++                        )
++                        grMrkdwnFileMessage = gr.HTML(value="You have", elem_classes ="civsfz-msg", visible=False)
++                        grTxtSaveFilename = gr.Textbox(
++                            label="Save file name",
++                            elem_id=f"civsfz_save_file_name{self.id}",
++                            tooltip="File name of model file to save. Editable.",
++                            interactive=True,
++                            value=None,
++                        )
++                    with gr.Row(elem_classes="civsfz-download-meta-row"):
++                        grTxtDlUrl = gr.Textbox(label="Download Url", interactive=False, value=None)
++                        grTxtEarlyAccess = gr.Textbox(label='Early Access', interactive=False, value=None, visible=False)
++                        grTxtHash = gr.Textbox(label="File hash", interactive=False, value="", visible=False)
++                        grTxtApiKey = gr.Textbox(
++                            label="API Key",
++                            elem_id=f"civsfz_api_key{self.id}",
++                            tooltip="Enter API key obtained from CivitAI. You can also enter it in Settings.",
++                            value=lambda: self.APIKey,
++                            type="password",
++                            lines=1,
++                        )
++                    with gr.Row(elem_classes="civsfz-prompt-row"):
++                        # grBtnCopyWords = gr.Button(value="📋", interactive=True, elem_classes="civsfz-small-buttons", visible=False)
++                        grBtnCopyWords = ui_components.ToolButton(
++                            value="📋",
++                            interactive=True,
++                            visible=False,
++                            elem_id=f"civsfz_copy_triggerwords{self.id}",
++                            tooltip="Copy trigger words",
++                            )
++                        # grBtnSendWords = gr.Button(value="📝", interactive=True, elem_classes="civsfz-small-buttons", visible=False)
++                        grBtnSendWords = ui_components.ToolButton(
++                            value="📝",
++                            interactive=True,
++                            visible=False,
++                            elem_id=f"civsfz_send_triggerwords{self.id}",
++                            tooltip="Send trigger words to txt2img",
++                            )
++                        grTxtLoraPrompt = gr.Textbox(
++                            label="Prompt to activate the model",
++                            elem_id=f"civsfz_lora_prompt{self.id}",
++                            tooltip="A prompt to call a model configured from Trained Tags",
++                            interactive=True,
++                            value=None,
++                            visible=False,
++                        )
++                    with gr.Row(elem_classes="civsfz-model-info-row"):
++                        grTxtVersionInfo = gr.Textbox(label="Version base model",value="",visible=False)
++                        grHtmlModelInfo = gr.HTML(elem_id=f"civsfz_model-info{self.id}")
+ 
+             # def renameTab(type):
+             #    return gr.TabItem.update(label=f'{self.id}:{type}')
+@@ -1298,21 +1306,12 @@ class Components():
+ 
+     def compAnchorNav(self):
+         value = (
+-            f"<div onclick='civsfz_scroll_to(\"#civsfz_tab-element\",0);'>"
+-            #"<span style='font-size:200%;color:transparent;text-shadow:0 0 0 orange;cursor: pointer;pointer-events: auto;'>🔝</span>"
+-            "<span style='font-size:200%;cursor: pointer;pointer-events: auto;'>🔍️</span>"
+-            "</div>"
+-            f"<div onclick='civsfz_scroll_to(\"#civsfz_model-navigation{self.id}\");'>"
+-            "<span style='font-size:200%;cursor: pointer;pointer-events: auto;'>📚</span>"
+-            "</div>"
+-            f"<div onclick='civsfz_scroll_to(\"#civsfz_model-data{self.id}\");'>"
+-            "<span style='font-size:200%;cursor: pointer;pointer-events: auto;'>📥</span>"
+-            "</div>"
+-            f"<div onclick='civsfz_scroll_to(\"#civsfz-model-description{self.id}\",-100);'>"
+-            "<span style='font-size:200%;cursor: pointer;pointer-events: auto;'>🧾</span>"
+-            "</div>"
+-            f"<div onclick='civsfz_scroll_to(\"#civsfz-sample-images{self.id}\",-100);'>"
+-            "<span style='font-size:200%;cursor: pointer;pointer-events: auto;'>🏞️</span>"
++            '<div class="civsfz-anchor-stack">'
++            f"<button type='button' class='civsfz-anchor-link' onclick='civsfz_scroll_to(\"#civsfz_tab-element\",0);'><span>Search</span><strong>⌕</strong></button>"
++            f"<button type='button' class='civsfz-anchor-link' onclick='civsfz_scroll_to(\"#civsfz_model-navigation{self.id}\");'><span>Gallery</span><strong>▦</strong></button>"
++            f"<button type='button' class='civsfz-anchor-link' onclick='civsfz_scroll_to(\"#civsfz_model-data{self.id}\");'><span>Inspector</span><strong>⇣</strong></button>"
++            f"<button type='button' class='civsfz-anchor-link' onclick='civsfz_scroll_to(\"#civsfz-model-description{self.id}\",-100);'><span>Notes</span><strong>☰</strong></button>"
++            f"<button type='button' class='civsfz-anchor-link' onclick='civsfz_scroll_to(\"#civsfz-sample-images{self.id}\",-100);'><span>Samples</span><strong>◫</strong></button>"
+             "</div>"
+         )
+         grHtmlAnchorNav = gr.HTML(
+diff --git a/style.css b/style.css
+index 992f93e..3a89f3c 100644
+--- a/style.css
++++ b/style.css
+@@ -1,281 +1,748 @@
+-
+ .civsfz-custom-property {
+-	--civsfz-shadow-color-default: hsl(225, 15%, 30% , 0.7);
+-	--civsfz-shadow-color-alreadyhave: hsl(180, 80%, 50%, 0.8);
+-	--civsfz-shadow-color-alreadyhad: hsl(180, 60%, 30%, 0.8);
+-	--civsfz-background-color-figcaption: hsl(225, 15%, 30% , 0.8);
+-	--civsfz-background-color-early-access-in: hsl(225, 80%, 40%, 0.8);
+-	--civsfz-hover-scale: 1.5;
+-	--civsfz-card-width: 8;
+-	--civsfz-card-height: 12;
+-	--civsfz-card-size-unit: 1em;
++	--civsfz-shadow-color-default: hsl(225 18% 46% / 0.85);
++	--civsfz-shadow-color-alreadyhave: hsl(168 86% 52% / 0.88);
++	--civsfz-shadow-color-alreadyhad: hsl(197 64% 42% / 0.82);
++	--civsfz-background-color-figcaption: hsl(220 27% 11% / 0.9);
++	--civsfz-background-color-early-access-in: hsl(208 88% 48% / 0.92);
++	--civsfz-hover-scale: 1.08;
++	--civsfz-card-width: 7;
++	--civsfz-card-height: 10;
++	--civsfz-card-size-unit: 1rem;
++	--civsfz-card-gap: 0.9rem;
++	--civsfz-panel-bg: linear-gradient(180deg, rgba(14, 19, 28, 0.96), rgba(10, 14, 21, 0.98));
++	--civsfz-panel-bg-soft: linear-gradient(180deg, rgba(27, 34, 47, 0.82), rgba(17, 22, 31, 0.94));
++	--civsfz-panel-border: rgba(140, 160, 190, 0.14);
++	--civsfz-panel-shadow: 0 16px 42px rgba(0, 0, 0, 0.24);
++	--civsfz-control-height: 3rem;
++	--civsfz-radius: 18px;
++	--civsfz-radius-sm: 13px;
++	--civsfz-text-primary: #edf2ff;
++	--civsfz-text-muted: rgba(219, 227, 243, 0.7);
++	--civsfz-text-soft: rgba(219, 227, 243, 0.54);
++	--civsfz-line: rgba(255, 255, 255, 0.075);
++	--civsfz-accent: #82a7ff;
+ }
+ 
+-.civsfz-modellist {
++#civsfz_tab-element .civsfz-tabbar:first-child {
++	position: sticky;
++	top: 0;
++	z-index: 8;
++	backdrop-filter: blur(14px);
++	background: linear-gradient(180deg, rgba(6, 9, 14, 0.94), rgba(6, 9, 14, 0.72));
++	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
++}
++
++[id^="civsfz_tab_item"] {
++	color: var(--civsfz-text-primary);
++}
++
++[id^="civsfz_tab_item"] a {
++	color: #aecdff;
++}
++
++[id^="civsfz_tab_item"] input,
++[id^="civsfz_tab_item"] textarea,
++[id^="civsfz_tab_item"] select {
++	border-radius: var(--civsfz-radius-sm) !important;
++}
++
++[id^="civsfz_tab_item"] .block,
++[id^="civsfz_tab_item"] fieldset,
++[id^="civsfz_tab_item"] .gr-box,
++[id^="civsfz_tab_item"] .gr-panel {
++	min-width: 0;
++}
++
++.civsfz-browser-shell {
++	gap: 1rem;
++}
++
++.civsfz-search-shell,
++[id^="civsfz_model-navigation"] .civsfz-navigation-buttons,
++[id^="civsfz_model-navigation"] .civsfz-jump-page-control,
++[id^="civsfz_model-data"] .civsfz-save-buttons,
++[id^="civsfz_model-data"] .civsfz-anchor-shell,
++[id^="civsfz_model-data"] .civsfz-user-management-row,
++[id^="civsfz_model-data"] .civsfz-version-row,
++[id^="civsfz_model-data"] .civsfz-file-row,
++[id^="civsfz_model-data"] .civsfz-save-path-row,
++[id^="civsfz_model-data"] .civsfz-download-meta-row,
++[id^="civsfz_model-data"] .civsfz-prompt-row,
++[id^="civsfz_model-data"] .civsfz-model-info-row,
++[id^="civsfz_model-data"] .civsfz-detail-title-row {
++	background: var(--civsfz-panel-bg);
++	border: 1px solid var(--civsfz-panel-border);
++	border-radius: var(--civsfz-radius);
++	box-shadow: var(--civsfz-panel-shadow);
++}
++
++.civsfz-search-shell {
++	padding: 1rem;
++}
++
++.civsfz-search-top,
++.civsfz-search-mode-row,
++.civsfz-search-input-row {
++	display: grid !important;
++	grid-template-columns: 1fr;
++	gap: 0.85rem;
++}
++
++.civsfz-filter-row {
++	gap: 0.75rem;
++}
++
++.civsfz-search-shell .civsfz-sensitive-accordion {
++	margin-top: 0;
++}
++
++.civsfz-search-shell .label-wrap,
++[id^="civsfz_model-navigation"] .label-wrap,
++[id^="civsfz_model-data"] .label-wrap {
++	opacity: 0.92;
++}
++
++.civsfz-workspace {
++	display: grid !important;
++	grid-template-columns: minmax(0, 1.55fr) minmax(22rem, 1fr);
++	align-items: start;
++	gap: 1rem;
++}
++
++.civsfz-gallery-pane,
++.civsfz-detail-pane {
++	min-width: 0;
++}
++
++[id^="civsfz_model-navigation"] .civsfz-navigation-buttons {
++	position: sticky;
++	top: 3rem;
++	z-index: 5;
++	display: grid;
++	grid-template-columns: minmax(13rem, 2.6fr) repeat(2, minmax(8rem, 1fr)) minmax(5rem, auto);
++	gap: 0.75rem;
++	align-items: center;
++	padding: 0.8rem;
++}
++
++[id^="civsfz_model-navigation"] .civsfz-card-grid-row {
++	margin-top: 0.75rem;
++}
++
++[id^="civsfz_model-navigation"] .civsfz-card-grid-host {
++	width: 100%;
++}
++
++[id^="civsfz_model-navigation"] .civsfz-jump-page-control {
++	position: sticky;
++	bottom: 0;
++	z-index: 5;
++	display: grid;
++	grid-template-columns: minmax(0, 1fr) minmax(8rem, auto) minmax(16rem, 19rem);
++	gap: 0.75rem;
++	align-items: end;
++	padding: 0.8rem;
++	margin-top: 0.8rem;
++}
++
++[id^="civsfz_model-navigation"] .civsfz-pages-pill textarea,
++[id^="civsfz_model-navigation"] .civsfz-pages-pill input,
++[id^="civsfz_model-data"] .civsfz-download-status textarea,
++[id^="civsfz_model-data"] .civsfz-download-status input {
++	min-height: var(--civsfz-control-height);
++	border-radius: var(--civsfz-radius-sm);
++	text-align: center;
++	font-weight: 700;
++	background: rgba(17, 22, 31, 0.95);
++}
++
++[id^="civsfz_model-navigation"] .civsfz-pages-pill {
++	min-width: 5rem;
++}
++
++[id^="civsfz_apicontrol"] .civsfz-btn button,
++[id^="civsfz_model-navigation"] .civsfz-btn button,
++[id^="civsfz_model-data"] .civsfz-btn button,
++[id^="civsfz_model-data"] button {
++	min-height: var(--civsfz-control-height);
++	border-radius: var(--civsfz-radius-sm);
++	font-weight: 700;
++	letter-spacing: 0.01em;
++	box-shadow: none;
++}
++
++[id^="civsfz_apicontrol"] .civsfz-btn-primary button,
++[id^="civsfz_model-data"] .civsfz-btn-primary button {
++	background: linear-gradient(180deg, rgba(113, 144, 222, 0.95), rgba(67, 91, 153, 0.98));
++	border: 1px solid rgba(190, 211, 252, 0.28);
++}
++
++[id^="civsfz_apicontrol"] .civsfz-btn-secondary button,
++[id^="civsfz_model-data"] .civsfz-btn-secondary button,
++[id^="civsfz_model-navigation"] .civsfz-btn-secondary button {
++	background: rgba(43, 51, 63, 0.98);
++	border: 1px solid rgba(171, 186, 214, 0.12);
++}
++
++[id^="civsfz_model-navigation"] .civsfz-btn-accent button {
++	background: linear-gradient(180deg, rgba(73, 86, 118, 0.98), rgba(52, 63, 92, 0.98));
++	border: 1px solid rgba(173, 197, 235, 0.16);
++}
++
++[id^="civsfz_model-navigation"] .civsfz-browsing-level {
++	margin: 0;
++	border-radius: var(--civsfz-radius-sm);
++	background: rgba(15, 20, 28, 0.52);
++	border: 1px solid rgba(171, 186, 214, 0.1);
++	padding: 0.2rem 0.45rem;
++}
++
++[id^="civsfz_model-data"] .civsfz-anchor-shell,
++[id^="civsfz_model-data"] .civsfz-save-buttons {
++	position: sticky;
++	top: 3rem;
++	z-index: 5;
++	padding: 0.75rem;
++}
++
++[id^="civsfz_model-data"] .civsfz-save-buttons {
++	top: 7.75rem;
++}
++
++[id^="civsfz_model-data"] .civsfz-detail-title-row,
++[id^="civsfz_model-data"] .civsfz-user-management-row,
++[id^="civsfz_model-data"] .civsfz-version-row,
++[id^="civsfz_model-data"] .civsfz-file-row,
++[id^="civsfz_model-data"] .civsfz-save-path-row,
++[id^="civsfz_model-data"] .civsfz-download-meta-row,
++[id^="civsfz_model-data"] .civsfz-prompt-row,
++[id^="civsfz_model-data"] .civsfz-model-info-row {
++	padding: 0.85rem;
++	margin-top: 0.85rem;
++}
++
++[id^="civsfz_model-data"] .civsfz-save-grid {
++	display: grid;
++	grid-template-columns: minmax(0, 1.4fr) minmax(14rem, 1fr);
++	gap: 0.75rem;
++	align-items: center;
++}
++
++[id^="civsfz_model-data"] .civsfz-action-button-row,
++[id^="civsfz_model-data"] .civsfz-status-row,
++[id^="civsfz_model-data"] .civsfz-user-management-controls {
++	gap: 0.75rem;
++}
++
++.civsfz-anchor-stack {
+ 	display: flex;
+ 	flex-wrap: wrap;
++	gap: 0.55rem;
+ }
+ 
+-.civsfz-modellist figure {
+-	margin: 4px;
+-	transition: transform .3s ease-out;
++.civsfz-anchor-link {
++	display: inline-flex;
++	align-items: center;
++	gap: 0.5rem;
++	padding: 0.55rem 0.8rem;
++	border-radius: 999px;
++	border: 1px solid rgba(171, 186, 214, 0.14);
++	background: rgba(25, 31, 42, 0.88);
++	color: var(--civsfz-text-primary);
++	font-size: 0.82rem;
++	font-weight: 700;
+ 	cursor: pointer;
+ }
+ 
++.civsfz-anchor-link strong {
++	font-size: 0.95rem;
++	color: rgba(193, 212, 255, 0.9);
++}
++
++.civsfz-title-card {
++	display: grid;
++	grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
++	border-radius: calc(var(--civsfz-radius) - 2px);
++	overflow: hidden;
++	background: linear-gradient(120deg, color-mix(in srgb, var(--civsfz-title-color) 26%, rgba(12, 16, 24, 1)) 0%, rgba(13, 17, 25, 0.96) 58%);
++}
++
++.civsfz-title-sidebar {
++	display: flex;
++	flex-direction: column;
++	justify-content: space-between;
++	gap: 0.5rem;
++	padding: 0.85rem;
++	background: rgba(255, 255, 255, 0.04);
++	border-right: 1px solid rgba(255, 255, 255, 0.08);
++}
++
++.civsfz-title-basemodel,
++.civsfz-title-status {
++	display: inline-flex;
++	align-items: center;
++	justify-content: center;
++	padding: 0.45rem 0.65rem;
++	border-radius: 999px;
++	font-size: 0.78rem;
++	font-weight: 800;
++}
++
++.civsfz-title-basemodel {
++	background: color-mix(in srgb, var(--civsfz-title-color) 90%, rgba(255, 255, 255, 0.08));
++	color: #09111b;
++}
++
++.civsfz-title-status {
++	background: rgba(90, 170, 255, 0.16);
++	color: #cfe6ff;
++}
++
++.civsfz-title-main {
++	padding: 0.9rem 1rem;
++}
++
++.civsfz-title-main h2 {
++	margin: 0.15rem 0 0.3rem;
++	font-size: 1.55rem;
++	line-height: 1.05;
++}
++
++.civsfz-title-version,
++.civsfz-title-creator {
++	margin: 0;
++	color: var(--civsfz-text-muted);
++}
++
++.civsfz-title-version {
++	font-size: 0.82rem;
++	text-transform: uppercase;
++	letter-spacing: 0.08em;
++}
++
++.civsfz-title-creator {
++	font-size: 0.92rem;
++}
++
++.civsfz-modellist {
++	display: grid;
++	grid-template-columns: repeat(auto-fill, minmax(max(9.5rem, calc(var(--civsfz-card-width) * 1.28rem)), 1fr));
++	gap: var(--civsfz-card-gap);
++	align-items: start;
++	padding: 0.25rem 0.05rem 0.95rem;
++}
++
+ .civsfz-modelcard {
+ 	position: relative;
++	margin: 0;
++	border-radius: 16px;
+ 	overflow: hidden;
++	cursor: pointer;
++	background: rgba(255, 255, 255, 0.04);
++	box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
++	transition: transform 0.28s ease, box-shadow 0.28s ease;
+ }
+ 
+ .civsfz-modelcard:hover {
+-	transform: scale(var(--civsfz-hover-scale), var(--civsfz-hover-scale));
+-	position: relative;
+-	overflow: visible;
+-	/* need for z-index */
++	transform: translateY(-6px) scale(var(--civsfz-hover-scale));
+ 	z-index: var(--layer-5);
+-	box-shadow: 0 0 4px 6px var(--civsfz-shadow-color-default);
++	box-shadow: 0 22px 38px rgba(0, 0, 0, 0.34), 0 0 0 2px var(--civsfz-shadow-color-default);
+ }
+ 
+ .civsfz-modelcardalreadyhave {
+-	box-shadow: 0 0 1px 4px var(--civsfz-shadow-color-alreadyhave);
+-}
+-.civsfz-modelcardalreadyhave:hover {
+-	box-shadow: 0 0 4px 6px var(--civsfz-shadow-color-alreadyhave);
++	box-shadow: 0 0 0 2px var(--civsfz-shadow-color-alreadyhave);
+ }
++
+ .civsfz-modelcardalreadyhad {
+-	box-shadow: 0 0 1px 4px var(--civsfz-shadow-color-alreadyhad);
++	box-shadow: 0 0 0 2px var(--civsfz-shadow-color-alreadyhad);
+ }
+-.civsfz-modelcardalreadyhad:hover {
+-	box-shadow: 0 0 4px 6px var(--civsfz-shadow-color-alreadyhad);
++
++.civsfz-card-media img,
++.civsfz-card-media video {
++	width: 100%;
++	height: clamp(12rem, calc(var(--civsfz-card-height) * 1.12rem), 17rem);
++	object-fit: cover;
++	display: block;
++	background: rgba(255, 255, 255, 0.04);
+ }
+ 
+-/*
+-.civsfz-bgcolor-base {
+-	background-color: var(--civsfz-figcaption-background-color);
++.civsfz-nsfw img,
++.civsfz-nsfw video {
++	filter: blur(12px);
+ }
+-.civsfz-bgcolor-SD1 {
+-	background-color: var(--civsfz-sd1-background-color);
++
++.civsfz-cardnsfw img,
++.civsfz-cardnsfw video {
++	filter: blur(6px);
+ }
+-.civsfz-bgcolor-SD2 {
+-	background-color: var(--civsfz-sd2-background-color);
++
++.civsfz-card-chips {
++	position: absolute;
++	top: 0.55rem;
++	left: 0.55rem;
++	right: 0.55rem;
++	display: flex;
++	justify-content: space-between;
++	align-items: flex-start;
++	gap: 0.45rem;
++	pointer-events: none;
+ }
+-.civsfz-bgcolor-SD3 {
+-	background-color: var(--civsfz-sd3-background-color);
++
++.civsfz-modeltype,
++.civsfz-card-badge,
++.civsfz-basemodel {
++	display: inline-flex;
++	align-items: center;
++	padding: 0.28rem 0.48rem;
++	border-radius: 999px;
++	font-size: 0.69rem;
++	font-weight: 800;
++	backdrop-filter: blur(10px);
+ }
+-.civsfz-bgcolor-SD35 {
+-	background-color: var(--civsfz-sd35-background-color);
++
++.civsfz-modeltype {
++	background: rgba(8, 13, 20, 0.78);
+ }
+-.civsfz-bgcolor-SDXL {
+-	background-color: var(--civsfz-sdxl-background-color);
++
++.civsfz-card-badge {
++	background: rgba(33, 41, 56, 0.88);
+ }
+-.civsfz-bgcolor-Pony {
+-	background-color: var(--civsfz-pony-background-color);
++
++.civsfz-card-badge-ea {
++	background: rgba(47, 132, 255, 0.88);
+ }
+-.civsfz-bgcolor-Illustrious {
+-	background-color: var(--civsfz-illustrious-background-color);
++
++.civsfz-card-badge-ea-out {
++	background: rgba(63, 83, 120, 0.9);
+ }
+-.civsfz-bgcolor-Flux1 {
+-	background-color: var(--civsfz-flux1-background-color);
++
++.civsfz-card-badge-ban {
++	background: rgba(110, 57, 69, 0.92);
+ }
+-*/
+-.civsfz-modelcard img {
+-	/*filter: blur(6px);*/
+-	width:  calc(var(--civsfz-card-width) * var(--civsfz-card-size-unit));
+-	height: calc(var(--civsfz-card-height) * var(--civsfz-card-size-unit));
+-	object-fit: cover;
++
++.civsfz-card-badge-own {
++	background: rgba(38, 134, 112, 0.92);
+ }
+ 
+-.civsfz-modelcard video {
+-	/*filter: blur(6px);*/
+-	width:  calc(var(--civsfz-card-width) * var(--civsfz-card-size-unit));
+-	height: calc(var(--civsfz-card-height) * var(--civsfz-card-size-unit));
+-	object-fit: cover;
++.civsfz-card-badge-own-old {
++	background: rgba(43, 104, 137, 0.92);
+ }
+ 
+-.civsfz-modelcard figcaption {
++.civsfz-card-overlay {
+ 	position: absolute;
+-	bottom: 5px;
+-	left: 5px;
+-	right: 5px;
+-	word-break: break-word;
+-	background-color: var(--civsfz-background-color-figcaption);
+-	/*transition: bottom .3s ease-out;*/
+-	max-height: 60%;
++	left: 0;
++	right: 0;
++	bottom: 0;
++	padding: 3.1rem 0.75rem 0.72rem;
++	background: linear-gradient(180deg, rgba(10, 14, 22, 0) 0%, rgba(10, 14, 22, 0.52) 35%, var(--civsfz-background-color-figcaption) 100%);
+ }
+ 
+-.civsfz-modelcard:hover figcaption {
+-	bottom: initial;
+-	max-height: initial;
++.civsfz-card-title {
++	font-size: 0.96rem;
++	font-weight: 800;
++	line-height: 1.15;
++	display: -webkit-box;
++	-webkit-box-orient: vertical;
++	-webkit-line-clamp: 2;
++	overflow: hidden;
+ }
+ 
+-.civsfz-modelcard .civsfz-basemodel {
+-	position: absolute;
+-	top: 0px;
+-	right: 0px;
+-	word-break: break-word;
+-	font-size: smaller;
+-	max-width: 70%;
+-	text-align: right;
+-}
+-.civsfz-modelcard:hover .civsfz-basemodel {
+-	top: -1.5em;
+-}
+-.civsfz-modelcard .civsfz-modeltype  {
+- 	position: absolute;
+- 	top: 0px;
+- 	left: 0px;
+- 	word-break: break-word;
+- 	font-size: smaller;
+-	background-color: var(--civsfz-background-color-figcaption);
+- }
+-.civsfz-modelcard:hover .civsfz-modeltype {
+-	top: -1.5em;
+-}
+-
+-
+-.civsfz-modelcard .civsfz-creator-flag {
+-	position: absolute;
+-	bottom: 4px;
+-	right: -3px;
+-	word-break: break-word;
+-	/* color: gold; */
+-	font-size: x-large;
+-	text-shadow: -3px 3px 2px black;
++.civsfz-card-subtitle {
++	margin-top: 0.32rem;
++	color: var(--civsfz-text-muted);
++	font-size: 0.78rem;
++	white-space: nowrap;
++	overflow: hidden;
++	text-overflow: ellipsis;
+ }
+-.civsfz-modelcard:hover .civsfz-creator-flag {
+-	bottom: -1em;
+-	right: -0.5em;
+-	opacity: 90%;
+-	transform:rotate(20deg);
++
++.civsfz-card-footer {
++	margin-top: 0.65rem;
++	display: flex;
++	align-items: center;
++	justify-content: space-between;
++	gap: 0.5rem;
+ }
+ 
+-.civsfz-modelcard .civsfz-early-access-out {
+-	position: absolute;
+-	top: 1.4em;
+-	right: 0em;
+-	font-size: smaller;
+-	background-color: var(--civsfz-early-access-out-background-color);
++.civsfz-card-flags {
++	display: flex;
++	flex-wrap: wrap;
++	justify-content: flex-end;
++	gap: 0.35rem;
+ }
+-.civsfz-modelcard:hover .civsfz-early-access-out {
+-	top: -1.5em;
+-	right: -1.2em;
++
++.civsfz-info-shell {
++	display: grid;
++	gap: 1rem;
+ }
+-.civsfz-modelcard .civsfz-early-access-in {
+-	position: absolute;
+-	top: 1.4em;
+-	right: 0em;
+-	word-break: break-word;
+-	font-size: smaller;
+-	background-color: var(--civsfz-background-color-early-access-in);
++
++.civsfz-info-topbar {
++	display: flex;
++	align-items: center;
++	justify-content: space-between;
++	gap: 0.75rem;
+ }
+-.civsfz-modelcard:hover .civsfz-early-access-in {
+-	top: -1.5em;
+-	right: -1.2em;
++
++.civsfz-info-version {
++	font-size: 0.78rem;
++	text-transform: uppercase;
++	letter-spacing: 0.08em;
++	color: var(--civsfz-text-soft);
+ }
+ 
+-.civsfz-nsfw img {
+-	filter: blur(12px);
++.civsfz-open-link,
++.civsfz-info-pill,
++.civsfz-inline-chip,
++.civsfz-chip {
++	display: inline-flex;
++	align-items: center;
++	gap: 0.35rem;
++	padding: 0.35rem 0.6rem;
++	border-radius: 999px;
+ }
+ 
+-.civsfz-cardnsfw img {
+-	filter: blur(6px);
++.civsfz-open-link {
++	background: rgba(29, 38, 53, 0.9);
++	border: 1px solid rgba(171, 186, 214, 0.13);
++	text-decoration: none;
+ }
+ 
+-.civsfz-nsfw video {
+-	filter: blur(12px);
++.civsfz-info-hero {
++	display: grid;
++	grid-template-columns: minmax(0, 1.35fr) minmax(16rem, 0.9fr);
++	gap: 1rem;
+ }
+ 
+-.civsfz-cardnsfw video {
+-	filter: blur(6px);
++.civsfz-info-heading h1 {
++	margin: 0.35rem 0 0.35rem;
++	font-size: clamp(1.5rem, 2.6vw, 2.25rem);
++	line-height: 1.02;
+ }
+ 
+-#civsfz_tab-element .civsfz-tabbar:first-child {
+-	position: -webkit-sticky; /* Safari */
+-	position: sticky;
+-	top: 0em;
+-	z-index: 2;
++.civsfz-info-subtitle {
++	margin: 0;
++	color: var(--civsfz-text-muted);
+ }
+-[id^="civsfz_model-navigation"] .civsfz-navigation-buttons {
+-	position: -webkit-sticky;
+-	/* Safari */
+-	position: sticky;
+-	top: 3em;
+-	z-index: 1;
++
++.civsfz-info-pill {
++	background: rgba(34, 43, 56, 0.82);
++	font-size: 0.76rem;
++	font-weight: 800;
+ }
+-[id^="civsfz_model-navigation"] .civsfz-jump-page-control {
+-	position: -webkit-sticky;
+-	/* Safari */
+-	position: sticky;
+-	bottom: 0px;
+-	z-index: 1;
++
++.civsfz-info-pill-alert {
++	background: rgba(153, 53, 78, 0.92);
+ }
+-[id^="civsfz_model-data"] .civsfz-save-buttons {
+-	position: -webkit-sticky; /* Safari */
+-	position: sticky;
+-	top: 3em;
+-	z-index: 1;
+-}
+-[id^="civsfz_tab_item"] .civsfz-anchor-nav {
+-	text-align: right;
+-	position: -webkit-sticky; /* Safari */
+-	position:sticky;
+-	top: 7em;
+-	right: 2em;
+-	z-index: 2;
+-	float: inline-end;
+-	pointer-events: none;
+-	height: 0em;
+-	margin-right: -2em;
++
++.civsfz-info-permissions,
++.civsfz-info-section {
++	padding: 1rem;
++	border: 1px solid var(--civsfz-line);
++	border-radius: 16px;
++	background: var(--civsfz-panel-bg-soft);
+ }
+-.civsfz-sticky-parent {
+-	display: initial;
++
++.civsfz-info-permissions h3,
++.civsfz-info-section h2,
++.civsfz-info-block h3 {
++	margin: 0 0 0.65rem;
+ }
+-.civsfz-sticky-element {
+-	backdrop-filter: brightness(0.35);
+-	padding: 0.5em 0;
++
++.civsfz-info-section-head {
++	display: flex;
++	flex-wrap: wrap;
++	align-items: baseline;
++	justify-content: space-between;
++	gap: 0.65rem 1rem;
++	margin-bottom: 0.9rem;
++}
++
++.civsfz-info-section-head p,
++.civsfz-info-permissions p {
++	margin: 0;
++	color: var(--civsfz-text-muted);
++}
++
++.civsfz-model-overview {
++	display: grid;
++	grid-template-columns: repeat(2, minmax(0, 1fr));
++	gap: 0.9rem;
++}
++
++.civsfz-info-block {
++	padding: 0.95rem;
++	border-radius: 15px;
++	background: rgba(11, 16, 24, 0.4);
++	border: 1px solid rgba(255, 255, 255, 0.05);
++}
++
++.civsfz-info-block-wide {
++	grid-column: 1 / -1;
++}
++
++.civsfz-info-list {
++	display: grid;
++	gap: 0.65rem;
++	margin: 0;
++}
++
++.civsfz-info-list > div {
++	display: grid;
++	grid-template-columns: minmax(6rem, 7rem) minmax(0, 1fr);
++	gap: 0.75rem;
++	align-items: start;
++}
++
++.civsfz-info-list dt {
++	margin: 0;
++	color: var(--civsfz-text-soft);
++	font-size: 0.82rem;
++}
++
++.civsfz-info-list dd {
++	margin: 0;
++	overflow-wrap: anywhere;
++}
++
++.civsfz-chip-list {
++	display: flex;
++	flex-wrap: wrap;
++	gap: 0.5rem;
++}
++
++.civsfz-chip,
++.civsfz-inline-chip {
++	background: rgba(32, 41, 55, 0.88);
++	border: 1px solid rgba(171, 186, 214, 0.12);
++}
++
++.civsfz-copy {
++	cursor: copy;
++	margin-right: 0.35rem;
++}
++
++.civsfz-empty-copy {
++	color: var(--civsfz-text-muted);
++}
++
++.civsfz-richtext,
++.civsfz-sample-meta {
++	overflow-wrap: anywhere;
+ }
+-/*https: //github.com/gradio-app/gradio/issues/3337#issuecomment-1449589285*/
+-.civsfz-small-buttons {
+-	margin: 1.2em 0em 0.55em 0em !important;
+-	max-width: 2.5em;
+-	min-width: 2.5em !important;
+-	height: 2.4em;
++
++.civsfz-richtext > :first-child,
++.civsfz-sample-meta > :first-child {
++	margin-top: 0;
+ }
+-.civsfz-small-buttons2 {
+-	margin: 0em 0em 0.0em 0em !important;
+-	max-width: 2.5em;
+-	min-width: 2.5em !important;
+-	height: 2.4em;
++
++.sampleimgs {
++	display: grid;
++	gap: 1rem;
++}
++
++.civsfz-sample-card {
++	display: grid;
++	grid-template-columns: minmax(15rem, 1.2fr) minmax(0, 1fr);
++	gap: 1rem;
++	padding: 0.85rem;
++	border-radius: 16px;
++	background: rgba(10, 14, 21, 0.5);
++	border: 1px solid rgba(255, 255, 255, 0.06);
++}
++
++.civsfz-sample-media img,
++.civsfz-sample-media video {
++	width: 100%;
++	height: min(31rem, 62vh);
++	object-fit: contain;
++	border-radius: 12px;
++	background: rgba(0, 0, 0, 0.25);
++}
++
++.civsfz-download-list table {
++	width: 100%;
++	border-collapse: collapse;
++}
++
++.civsfz-download-list th,
++.civsfz-download-list td {
++	padding: 0.55rem;
++	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+ }
+ 
+ .civsfz-msg {
+-	/*align-self: center;*/
+-	text-align: center;
+-	background-color: maroon;
+-	margin: 1.1em 0em 0em 0em !important;
+-	max-width: 8em;
+-	min-width: 8em !important;
++	display: inline-flex;
++	align-items: center;
++	justify-content: center;
++	padding: 0.55rem 0.8rem;
++	border-radius: 999px;
++	background: rgba(38, 110, 85, 0.24);
++	border: 1px solid rgba(82, 194, 155, 0.22);
++	min-width: 8rem !important;
+ }
+ 
+-.civsfz-tooltip {
+-	position: relative;
+-	display: inline-block;
+-	/* border-bottom: 1px dotted black; */
+-}
+-.civsfz-tooltip .civsfz-tooltiptext {
+-	visibility: hidden;
+-	width: max-content;
+-	max-width: 100%;
+-	bottom: 100%;
+-	right: 0%;
+-	background-color: var(--civsfz-background-color-figcaption);
+-	text-align: left;
+-	padding: 2px 5px;
+-	border-radius: 6px;
+-	position: absolute;
+-	z-index: 1;
+-	font-size: x-small;
++[id^="civsfz_versionlist"] label {
++	border-radius: 12px !important;
++	background: rgba(18, 24, 34, 0.88);
++	border: 1px solid rgba(171, 186, 214, 0.1) !important;
++	padding: 0.4rem 0.55rem;
+ }
+-.civsfz-tooltip:hover .civsfz-tooltiptext {
+-	visibility: visible;
++
++@media (max-width: 1380px) {
++	.civsfz-workspace {
++		grid-template-columns: 1fr;
++	}
++
++	[id^="civsfz_model-data"] .civsfz-anchor-shell,
++	[id^="civsfz_model-data"] .civsfz-save-buttons,
++	[id^="civsfz_model-navigation"] .civsfz-navigation-buttons,
++	[id^="civsfz_model-navigation"] .civsfz-jump-page-control {
++		position: static;
++	}
++}
++
++@media (max-width: 980px) {
++	[id^="civsfz_model-navigation"] .civsfz-navigation-buttons,
++	[id^="civsfz_model-navigation"] .civsfz-jump-page-control,
++	[id^="civsfz_model-data"] .civsfz-save-grid,
++	.civsfz-info-hero,
++	.civsfz-model-overview,
++	.civsfz-sample-card {
++		grid-template-columns: 1fr;
++	}
++
++	.civsfz-title-card {
++		grid-template-columns: 1fr;
++	}
++
++	.civsfz-title-sidebar {
++		border-right: 0;
++		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
++	}
++
++	.civsfz-modellist {
++		grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
++	}
++}
++
++@media (max-width: 640px) {
++	.civsfz-search-shell,
++	[id^="civsfz_model-navigation"] .civsfz-navigation-buttons,
++	[id^="civsfz_model-navigation"] .civsfz-jump-page-control,
++	[id^="civsfz_model-data"] .civsfz-save-buttons,
++	[id^="civsfz_model-data"] .civsfz-anchor-shell,
++	[id^="civsfz_model-data"] .civsfz-user-management-row,
++	[id^="civsfz_model-data"] .civsfz-version-row,
++	[id^="civsfz_model-data"] .civsfz-file-row,
++	[id^="civsfz_model-data"] .civsfz-save-path-row,
++	[id^="civsfz_model-data"] .civsfz-download-meta-row,
++	[id^="civsfz_model-data"] .civsfz-prompt-row,
++	[id^="civsfz_model-data"] .civsfz-model-info-row,
++	[id^="civsfz_model-data"] .civsfz-detail-title-row {
++		padding: 0.7rem;
++	}
++
++	.civsfz-card-overlay {
++		padding: 2.7rem 0.65rem 0.65rem;
++	}
+ }
+diff --git a/templates/cardlist.jinja b/templates/cardlist.jinja
+index 43db114..9d44a16 100644
+--- a/templates/cardlist.jinja
++++ b/templates/cardlist.jinja
+@@ -1,41 +1,55 @@
+ {{ forTrigger }}
+-<div class="column civsfz-modellist">
++<div class="civsfz-modellist">
+ {%- for card in cards if card.matchLevel %}
+ 	{%- set nsfw = 'civsfz-cardnsfw' if card['isNsfw'] else '' %}
++	{%- set alreadyhave = '' %}
+ 	{%- if card['have'] == 'new' %}
+ 		{%- set alreadyhave = 'civsfz-modelcardalreadyhave' %}
+ 	{%- elif card['have'] == 'old' %}
+ 		{%- set alreadyhave = 'civsfz-modelcardalreadyhad' %}
+-	{%- endif %}	
++	{%- endif %}
+ 	<figure class="civsfz-modelcard {{ nsfw }} {{ alreadyhave }}" onclick="civsfz_select_model('Index{{ card['jsId'] }}:{{ card['index'] }}:{{ card['id'] }}')">
+-		{%- if card['imgType'] == 'image' %}
+-			<img src={{ card['imgsrc'] }} loading="lazy" alt="Preview image" />
+-		{%- elif card['imgType'] == 'video' %}
+-			<video loop autoplay muted poster={{ card['imgsrc'] }}>
+-				<source src={{ card['imgsrc'] }} type="video/webm" />
+-				<source src={{ card['imgsrc'] }} type="video/mp4" />
+-				<img src={{ card['imgsrc'] }} loading="lazy" alt="Preview image" type="image/gif" />
+-			</video>
+-		{%- else %}
+-			<img src="{{cardNoPreview}}" loading="lazy" alt="Preview image" />
+-		{%- endif %}
+-		<figcaption class="civsfz-tooltip">
+-			{{ card['name'] }}
+-			<span class="civsfz-tooltiptext">{{ card['creator'] }}</span>
++		<div class="civsfz-card-media">
++			{%- if card['imgType'] == 'image' %}
++				<img src={{ card['imgsrc'] }} loading="lazy" alt="Preview image" />
++			{%- elif card['imgType'] == 'video' %}
++				<video loop autoplay muted poster={{ card['imgsrc'] }}>
++					<source src={{ card['imgsrc'] }} type="video/webm" />
++					<source src={{ card['imgsrc'] }} type="video/mp4" />
++					<img src={{ card['imgsrc'] }} loading="lazy" alt="Preview image" type="image/gif" />
++				</video>
++			{%- else %}
++				<img src="{{cardNoPreview}}" loading="lazy" alt="Preview image" />
++			{%- endif %}
++		</div>
++		<div class="civsfz-card-chips">
++			<span class="civsfz-modeltype">{{ card['type'] }}</span>
++			{%- if card['ea'] == 'in' %}
++				<span class="civsfz-card-badge civsfz-card-badge-ea">Early Access</span>
++			{%- elif card['ea'] == 'out' %}
++				<span class="civsfz-card-badge civsfz-card-badge-ea-out">Released</span>
++			{%- endif %}
++		</div>
++		<figcaption class="civsfz-card-overlay">
++			<div class="civsfz-card-title">{{ card['name'] }}</div>
++			<div class="civsfz-card-subtitle">@{{ card['creator'] }}</div>
++			<div class="civsfz-card-footer">
++				<span class="civsfz-basemodel" style="background-color:{{ dictBasemodelColor[card['baseModel']]|trim }}D9;">{{ card['baseModel'] }}</span>
++				<div class="civsfz-card-flags">
++					{%- if card['favorite'] %}
++						<span class="civsfz-card-badge">Favorite</span>
++					{%- endif %}
++					{%- if card['ngUser'] %}
++						<span class="civsfz-card-badge civsfz-card-badge-ban">Muted</span>
++					{%- endif %}
++					{%- if card['have'] == 'new' %}
++						<span class="civsfz-card-badge civsfz-card-badge-own">Installed</span>
++					{%- elif card['have'] == 'old' %}
++						<span class="civsfz-card-badge civsfz-card-badge-own-old">Local</span>
++					{%- endif %}
++				</div>
++			</div>
+ 		</figcaption>
+-		<div class="civsfz-modeltype">{{ card['type'] }}</div>
+-		<div class="civsfz-basemodel" style="background-color:{{ dictBasemodelColor[card['baseModel']]|trim }}C0;">{{ card['baseModel'] }}</div>
+-		{%- if card['ea'] == 'in' %}
+-			<div class="civsfz-early-access-in">EA</div>
+-		{%- elif card['ea'] == 'out' %}
+-			<div class="civsfz-early-access-out">EA</div>	
+-		{%- endif %}
+-		{%- if card['favorite'] %}
+-			<div class="civsfz-creator-flag">⭐️</div>
+-		{%- endif %}
+-		{%- if card['ngUser'] %}
+-			<div class="civsfz-creator-flag">🚷</div>
+-		{%- endif %}
+ 	</figure>
+ {%- endfor %}
+ </div>
+diff --git a/templates/modelInfo.jinja b/templates/modelInfo.jinja
+index 0e974d3..620a5e4 100644
+--- a/templates/modelInfo.jinja
++++ b/templates/modelInfo.jinja
+@@ -1,47 +1,60 @@
+-{# Model Information #}
+ {{ js }}
+-<div style="text-align: right;">
+-	<i>Model Info Version: {{ modelInfo["infoVersion"] }}</i>
+-</div>
+-<div id="civsfz-model-description{{tabId}}">
+-	<h1>
+-		{%- if modelInfo['nsfw'] %}
+-			NSFW<br/>
+-		{%- endif %}
+-		{{ modelInfo["name"]|e }}
+-	</h1>
+-	<details open="true">
+-		<summary>Model Details</summary>
+-		<div style="float:right;width:35%;margin:-16px 0 1em 1em;">
+-			<h2>Permissions</h2>
++<div id="civsfz-model-description{{tabId}}" class="civsfz-info-shell">
++	<div class="civsfz-info-topbar">
++		<span class="civsfz-info-version">Info layout v{{ modelInfo["infoVersion"] }}</span>
++		<a class="civsfz-open-link" href="{{ modelInfo['downloadUrl'] }}" target="_blank">Open on CivitAI</a>
++	</div>
++
++	<div class="civsfz-info-hero">
++		<div class="civsfz-info-heading">
++			{%- if modelInfo['nsfw'] %}
++				<span class="civsfz-info-pill civsfz-info-pill-alert">NSFW</span>
++			{%- endif %}
++			<h1>{{ modelInfo["name"]|e }}</h1>
++			<p class="civsfz-info-subtitle">Selected version: {{ modelInfo["versionName"]|e }}</p>
++		</div>
++		<div class="civsfz-info-permissions">
++			<h3>Permissions</h3>
+ 			{{ permissions }}
+-			<p>{{ modelInfo["allow"]|e }}</p>
++			{%- if modelInfo["allow"] %}
++				<p>{{ modelInfo["allow"]|e }}</p>
++			{%- endif %}
+ 		</div>
+-		<div class="civsfz-modelInformation" style="overflow-wrap: anywhere;">
++	</div>
++
++	<section class="civsfz-info-section">
++		<div class="civsfz-info-section-head">
++			<h2>Overview</h2>
++			<p>Core metadata, file details, and tags for the selected asset.</p>
++		</div>
++		<div class="civsfz-modelInformation">
+ 			{{- basicInfo }}
+-			<a href="{{ modelInfo['downloadUrl'] }}">Download here</a>
+ 		</div>
+-		<div>
++	</section>
++
++	<section class="civsfz-info-section">
++		<div class="civsfz-info-section-head">
+ 			<h2>Model description</h2>
+-			<div>{{ modelInfo["description"] }}</div>
+-		</div>
+-		{%- if modelInfo["versionDescription"] %}
+-			<div>
+-				<h2>Version description</h2>
+-				<div>{{ modelInfo["versionDescription"] }}</div>
+-			</div>
+-		{%- endif %}
+-	</details>
+-	<div style="clear:both;">
+-	<h2 id="civsfz-sample-images{{tabId}}">Images</h2>
+-		<details open="true">
+-			<summary>Sample Images</summary>
+-			<p>Clicking on the image sends infotext to txt2img. If local, copy to clipboard</p>
+-			<div class="sampleimgs">
+-				{{- samples }}
+-			</div>
+-		</details>
+-	</div>
+-</div>
++		</div>
++		<div class="civsfz-richtext">{{ modelInfo["description"] }}</div>
++	</section>
+ 
++	{%- if modelInfo["versionDescription"] %}
++	<section class="civsfz-info-section">
++		<div class="civsfz-info-section-head">
++			<h2>Version notes</h2>
++		</div>
++		<div class="civsfz-richtext">{{ modelInfo["versionDescription"] }}</div>
++	</section>
++	{%- endif %}
+ 
++	<section class="civsfz-info-section">
++		<div class="civsfz-info-section-head">
++			<h2 id="civsfz-sample-images{{tabId}}">Sample images</h2>
++			<p>Click a sample to send infotext to txt2img. Local samples copy to clipboard.</p>
++		</div>
++		<div class="sampleimgs">
++			{{- samples }}
++		</div>
++	</section>
++</div>
+diff --git a/templates/modelTitle.jinja b/templates/modelTitle.jinja
+index f57ca0e..2b34d28 100644
+--- a/templates/modelTitle.jinja
++++ b/templates/modelTitle.jinja
+@@ -1,32 +1,16 @@
+-{%- from 'macros.jinja' import bgColor %}
+-{# {%- set modelcolor = "var(--civsfz-color-for-" + baseModel|replace(".", "_")|replace(" ", "_") + ")" %} #}
+-{%- set modelcolor = dictBasemodelColor[baseModel]|trim  %}
+-<div  style="display:grid;grid-template-columns: auto auto auto minmax(0, 1fr) ;">
+-	<div style="grid-column: 1 / 2;grid-row: 1 / 2;display: flex;align-items: center;justify-content:center; white-space: nowrap;background-color:{{ modelcolor }};">
+-		<span style="padding:0em 0.5em;">{{ baseModel|e }}</span>
++{%- set modelcolor = dictBasemodelColor[baseModel]|trim %}
++<div class="civsfz-title-card" style="--civsfz-title-color: {{ modelcolor }};">
++	<div class="civsfz-title-sidebar">
++		<span class="civsfz-title-basemodel">{{ baseModel|e }}</span>
++		{%- if not ea == "" %}
++			<span class="civsfz-title-status">Early Access</span>
++		{%- endif %}
+ 	</div>
+-
+-	{%- if not ea == "" %}
+-	<div
+-		style="grid-column: 1 / 2;grid-row: 2 / 2;display: flex;align-items: center;justify-content:center;white-space: nowrap; background-color: var(--civsfz-background-color-early-access-in);">
+-		&nbsp;&nbsp;Early Access&nbsp;&nbsp;
++	<div class="civsfz-title-main">
++		<p class="civsfz-title-version">{{ versionName|e }}</p>
++		<h2>{{ modelName|e }}</h2>
++		{%- if not uploadUser == "" %}
++			<p class="civsfz-title-creator">by {{ uploadUser|e }}</p>
++		{%- endif %}
+ 	</div>
+-	{%- else %}
+-	<div style="grid-column: 1 / 2;grid-row: 2 / 2;display: flex;align-items: center;"></div>
+-	{%- endif %}
+-	<div style="grid-column: 2 / 3;grid-row: 1 / 3;display: flex;align-items: center;font-size:x-large;background-color:hsl(from {{ modelcolor }} h s calc(l/1.5) );border: 2px solid {{ modelcolor }};border-right:none;">
+-		<div style="padding:0.0em 0.5em;line-height:1.2;">{{ modelName|e }}</div>
+-	</div>
+-	{%- if not uploadUser == "" %}
+-		<div
+-			style="grid-column: 3 / 4;grid-row: 1 / 2;display: flex;align-items: center;white-space: nowrap;font-size:normal;background-color:hsl(from {{ modelcolor }} h s calc(l/3) );border-left: 2px solid {{ modelcolor }};">
+-			<span style="padding:0.0em 0.5em;">by <span
+-					style="font-family:'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif">{{ uploadUser|e
+-					}}</span></span>
+-		</div>
+-	{%- endif %}
+-	<div
+-		style="grid-column: 3 / 4;grid-row: 2 / 2;display: flex;align-items: center;font-size:normal;background-color:hsl(from {{ modelcolor }} h s calc(l/1.8) );border: 2px solid {{ modelcolor }};border-left:none;">
+-		<span style="padding:0.0em 0.5em;">{{ versionName|e }}</span>
+-	</div>
+-</div>
+\ No newline at end of file
++</div>
+diff --git a/templates/modelbasicinfo.jinja b/templates/modelbasicinfo.jinja
+index 29617a3..756dced 100644
+--- a/templates/modelbasicinfo.jinja
++++ b/templates/modelbasicinfo.jinja
+@@ -1,95 +1,81 @@
+-{% set copy = '<span title="Copy to clipboard" style="cursor: copy;" onclick="civsfz_copyInnerText(this,false);">&#x1F4CB;</span>' %} {# 📋 #}
+-{% set tdStyle1 = 'style="max-width:20em;min-width:7em;padding:0.2em;"' %}
++{% set copy = '<span class="civsfz-copy" title="Copy to clipboard" onclick="civsfz_copyInnerText(this,false);">&#x1F4CB;</span>' %}
+ 
+-<div class="civsfz-modelBasicInfo" style="display:flex; align-items:flex-start; column-gap:2em;flex-wrap: wrap;">
+-	<table>
+-		<caption style="text-align: left">Model attributes</caption>
+-		<tr>
+-			<th {{ tdStyle1 }}>ID</th>
+-			<td {{ tdStyle1 }}>{{ copy }}<span>
+-				<a href="https://civitai.com/models/{{ modelInfo['id'] }}?modelVersionId={{ modelInfo['versionId'] }}" target="_blank">{{ modelInfo["id"] }}
+-				</a>
+-			</span></td>
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>Uploaded by</th>
+-			{%- if 'creator' in modelInfo -%}
+-				<td {{ tdStyle1 }}>{{ copy }}
+-					<span>
+-						<a href="https://civitai.com/user/{{ modelInfo['creator']['username'] }}" target="_blank">{{ modelInfo['creator']['username']|e }}</a>
+-					</span>
+-				</td>
+-			{%- else -%}
+-				<td {{ tdStyle1 }}><span>No creator information</span></td>
+-			{%- endif -%}
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>Published</th>
+-			<td {{ tdStyle1 }}>{{ published }}</td>
++<div class="civsfz-model-overview">
++	<section class="civsfz-info-block">
++		<h3>Model</h3>
++		<dl class="civsfz-info-list">
++			<div>
++				<dt>ID</dt>
++				<dd>{{ copy }}<span><a href="https://civitai.com/models/{{ modelInfo['id'] }}?modelVersionId={{ modelInfo['versionId'] }}" target="_blank">{{ modelInfo["id"] }}</a></span></dd>
++			</div>
++			<div>
++				<dt>Uploaded by</dt>
++				<dd>
++					{%- if 'creator' in modelInfo -%}
++						{{ copy }}<span><a href="https://civitai.com/user/{{ modelInfo['creator']['username'] }}" target="_blank">{{ modelInfo['creator']['username']|e }}</a></span>
++					{%- else -%}
++						<span>No creator information</span>
++					{%- endif -%}
++				</dd>
++			</div>
++			<div>
++				<dt>Published</dt>
++				<dd>{{ published }}</dd>
++			</div>
++			<div>
++				<dt>NSFW level</dt>
++				<dd>{{ strNsfw }}</dd>
++			</div>
++		</dl>
++	</section>
+ 
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>NSFW level</th>
+-			<td {{ tdStyle1 }}>{{ strNsfw }}</td>
+-		
+-		</tr>
+-	</table>
++	<section class="civsfz-info-block">
++		<h3>Version</h3>
++		<dl class="civsfz-info-list">
++			<div>
++				<dt>ID</dt>
++				<dd>{{ copy }}<span><a href="https://civitai.com/models/{{ modelInfo['id'] }}?modelVersionId={{ modelInfo['versionId'] }}" target="_blank">{{ modelInfo["versionId"] }}</a></span></dd>
++			</div>
++			<div>
++				<dt>Name</dt>
++				<dd>{{ modelInfo["versionName"]|e }}</dd>
++			</div>
++			<div>
++				<dt>Size</dt>
++				<dd>{{ (modelInfo["modelVersions"][0]["files"][fileIndex]["sizeKB"] * 1024) |filesizeformat|e }}</dd>
++			</div>
++			<div>
++				<dt>NSFW level</dt>
++				<dd>{{ strVNsfw }}</dd>
++			</div>
++			<div>
++				<dt>Type</dt>
++				<dd>{{ modelInfo["type"]|e }}</dd>
++			</div>
++			<div>
++				<dt>Base Model</dt>
++				<dd><span class="civsfz-inline-chip" style="background-color:{{ dictBasemodelColor[modelInfo['baseModel']]|trim }}D9;">{{ modelInfo["baseModel"]|e }}</span></dd>
++			</div>
++		</dl>
++	</section>
+ 
+-	<table>
+-		<caption style="text-align: left">Version attributes</caption>
+-		<tr>
+-			<th {{ tdStyle1 }}>ID</th>
+-			<td {{ tdStyle1 }}>{{ copy }}<span><a href="https://civitai.com/models/{{ modelInfo['id'] }}?modelVersionId={{ modelInfo['versionId'] }}" target="_blank">{{ modelInfo["versionId"] }}</a></span></td>
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>Name</th>
+-			<td {{ tdStyle1 }}>{{ modelInfo["versionName"]|e }}</td>
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>Size</th>
+-			<td {{ tdStyle1 }}>{{ (modelInfo["modelVersions"][0]["files"][fileIndex]["sizeKB"] * 1024) |filesizeformat|e }}</td>
+-		</tr>
+-		{# <tr>
+-			<th {{ tdStyle1 }}>Hash</th>
+-			<td {{ tdStyle1 }}>{{ copy -}}<span>{{ modelInfo["modelVersions"][0]["files"][fileIndex]["hashes"]["AutoV3"]|lower|e }}</span></td>
+-		</tr> #}
+-		<tr>
+-			<th {{ tdStyle1 }}>NSFW level</th>
+-			<td {{ tdStyle1 }}>{{ strVNsfw }}</td>
+-		
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>Type</th>
+-			<td {{ tdStyle1 }}>{{ modelInfo["type"]|e }}</td>
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>Base Model</th>
+-			<td {{ tdStyle1 }}><span style="background-color:{{ dictBasemodelColor[modelInfo['baseModel']]|trim }};">{{ modelInfo["baseModel"]|e }}</span></td>
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>Tags</th>
+-			<td {{ tdStyle1 }}>
+-				{%- for tag in modelInfo['tags'] %}
+-					<span style="display:inline-block;">
+-						{{ copy -}}
+-						<span>{{ tag|e -}}
+-					</span>
+-					{%- if not loop.last %}
+-					,</span>
+-					{%- else %}
+-						</span>
+-					{%- endif %}
+-				{%- endfor %}
+-			</td>
+-		</tr>
+-		<tr>
+-			<th {{ tdStyle1 }}>Trained Tags</th>
+-			<td {{ tdStyle1 }}>
+-					{%- for trainedW in modelInfo['trainedWords'] %}
+-						<p>{{ copy }}<span>{{ trainedW |e }}</span></p>
+-					{%- endfor %}
+-				</table>
+-			</td>
+-		</tr>
+-	</table>
+-</div>
+\ No newline at end of file
++	<section class="civsfz-info-block civsfz-info-block-wide">
++		<h3>Tags</h3>
++		<div class="civsfz-chip-list">
++			{%- for tag in modelInfo['tags'] %}
++				<span class="civsfz-chip">{{ copy }}<span>{{ tag|e }}</span></span>
++			{%- endfor %}
++		</div>
++	</section>
++
++	<section class="civsfz-info-block civsfz-info-block-wide">
++		<h3>Trained Tags</h3>
++		<div class="civsfz-chip-list">
++			{%- for trainedW in modelInfo['trainedWords'] %}
++				<span class="civsfz-chip">{{ copy }}<span>{{ trainedW|e }}</span></span>
++			{%- else %}
++				<span class="civsfz-empty-copy">No trained tags published.</span>
++			{%- endfor %}
++		</div>
++	</section>
++</div>
+diff --git a/templates/sampleImage.jinja b/templates/sampleImage.jinja
+index a36d3a1..06a5041 100644
+--- a/templates/sampleImage.jinja
++++ b/templates/sampleImage.jinja
+@@ -1,26 +1,25 @@
+-{# Sample image and infotext #}
+-{# pic  nsfw  #}
+-{%- set style='style="vertical-align: top;width: 35%;height: 30em;object-fit: contain;"' %}
++{%- set media_class = 'civsfz-sample-media has-meta' if pic['meta'] else 'civsfz-sample-media' %}
+ {%- if pic['meta'] %}
+-	{%- set style='style="cursor: copy;vertical-align: top;width: 35%;height: 30em;object-fit: contain;" onclick="civsfz_send2txt2img(this.dataset.infotext);"' %}
+-{%- endif %}
+-{%- if nsfw %}
+-	<div class="civsfz-nsfw" style="display:flex;margin-top: 1em">
++	{%- set media_attr='style="cursor: copy;" onclick="civsfz_send2txt2img(this.dataset.infotext);"' %}
+ {%- else %}
+-	<div style="display:flex;margin-top: 1em">
++	{%- set media_attr='' %}
+ {%- endif %}
+-	{%- if pic['type'] == 'image' %}
+-		<img loading="lazy" alt="Preview image" src={{ pic['url'] }} {{ style }} data-infotext="{{- infotext|e -}}"/>
+-	{%- else %}
+-		<video loop autoplay muted poster={{ pic['url'] }} {{ style }} data-infotext="{{- infotext|e -}}">
+-			<source src={{ pic['url'] }} type="video/webm" />
+-			<source src={{ pic['url'] }} type="video/mp4" />
+-			<img loading="lazy" alt="Preview image" src={{ pic['url'] }} type="image/gif" />
+-		</video>
+-	{%- endif %}
++
++<div class="civsfz-sample-card{% if nsfw %} civsfz-nsfw{% endif %}">
++	<div class="{{ media_class }}">
++		{%- if pic['type'] == 'image' %}
++			<img loading="lazy" alt="Preview image" src={{ pic['url'] }} {{ media_attr }} data-infotext="{{- infotext|e -}}"/>
++		{%- else %}
++			<video loop autoplay muted poster={{ pic['url'] }} {{ media_attr }} data-infotext="{{- infotext|e -}}">
++				<source src={{ pic['url'] }} type="video/webm" />
++				<source src={{ pic['url'] }} type="video/mp4" />
++				<img loading="lazy" alt="Preview image" src={{ pic['url'] }} type="image/gif" />
++			</video>
++		{%- endif %}
++	</div>
+ 	{%- if pic['meta']  %}
+-		<div style="width: 65%;padding-left: 1em;height: 30em;overflow-y: auto;overflow-wrap: anywhere;">
++		<div class="civsfz-sample-meta">
+ 			{{ metaHtml }}
+ 		</div>
+ 	{%- endif %}
+-</div>
+\ No newline at end of file
++</div>

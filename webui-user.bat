@@ -1,10 +1,11 @@
 @echo off
 
-:: set PYTHON=
+set "PYTHON=C:\Users\vedang\AppData\Local\Programs\Python\Python312\python.exe"
 :: set GIT=
 :: set VENV_DIR=
 
-set COMMANDLINE_ARGS=
+set "A1111_HOME=D:\AI tools\automatic 1111"
+set "COMMANDLINE_ARGS=--skip-python-version-check --forge-ref-a1111-home \"%A1111_HOME%\""
 
 :: --xformers --sage --uv
 :: --pin-shared-memory --cuda-malloc --cuda-stream

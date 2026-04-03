@@ -1,0 +1,19 @@
+{
+  "VERSION_UID": "PY313",
+  "disable_all_extensions": "none",
+  "civitai_link_logging": true,
+  "civitai_download_previews": true,
+  "civitai_download_triggers": true,
+  "civitai_nsfw_previews": true,
+  "civitai_download_missing_models": true,
+  "civitai_hashify_resources": true,
+  "civitai_folder_model": "",
+  "civitai_folder_lora": "",
+  "civitai_folder_lyco": "",
+  "civsfz_number_of_tabs": 3,
+  "civsfz_number_of_cards": 100,
+  "civsfz_card_size_width": 7,
+  "civsfz_card_size_height": 10,
+  "civsfz_hover_zoom_magnification": 1.08,
+  "cross_attention_optimization": "Automatic"
+}
