@@ -211,7 +211,7 @@ index d9660fd..949bf93 100644
      text = ""
      prevEndTag = ""
 diff --git a/scripts/civsfz_ui.py b/scripts/civsfz_ui.py
-index 84d2d60..0398295 100644
+index 84d2d60..4e622b9 100644
 --- a/scripts/civsfz_ui.py
 +++ b/scripts/civsfz_ui.py
 @@ -7,7 +7,7 @@ import re
@@ -468,11 +468,6 @@ index 84d2d60..0398295 100644
 -                                tooltip="Save model file",
 -                                interactive=False,
 -                                min_width=80,
--                            )
--                    with gr.Column(scale=1):
--                        with gr.Row():
--                            grTextProgress = gr.Textbox(
--                                label="Download status", show_label=False
 +            with gr.Row(elem_classes="civsfz-workspace"):
 +                with gr.Column(elem_id=f"civsfz_model-navigation{self.id}", elem_classes="civsfz-gallery-pane"):
 +                    with gr.Row(elem_id=f"civsfz_apicontrol{self.id}", elem_classes="civsfz-navigation-buttons civsfz-sticky-element"):
@@ -483,6 +478,11 @@ index 84d2d60..0398295 100644
 +                                elem_classes="civsfz-btn civsfz-btn-primary",
 +                                tooltip="Get model list and display as model cards",
                              )
+-                    with gr.Column(scale=1):
+-                        with gr.Row():
+-                            grTextProgress = gr.Textbox(
+-                                label="Download status", show_label=False
+-                            )
 -                            # deprecated grBtnCancel = gr.Button(value="Cancel",interactive=False, variant='stop', min_width=80)
 -                with gr.Row():
 -                    with gr.Accordion(
@@ -784,7 +784,121 @@ index 84d2d60..0398295 100644
  
              # def renameTab(type):
              #    return gr.TabItem.update(label=f'{self.id}:{type}')
-@@ -1298,21 +1306,12 @@ class Components():
+@@ -897,6 +905,16 @@ class Components():
+                                                 self.Civitai.getSelectedVersionName()
+                                             )
+                     modelInfo = self.Civitai.makeModelInfo2(nsfwLevel=sum(grChkbxgrpLevel))
++                    txtEarlyAccess = self.Civitai.getSelectedVersionEarlyAccessDeadline()
++                    grHtmlModelName = gr.HTML.update(
++                        value=self.Civitai.modelNameTitleHtml(
++                            self.Civitai.getSelectedModelName(),
++                            self.Civitai.getSelectedVersionName(),
++                            self.Civitai.getSelectedVersionBaseModel(),
++                            self.Civitai.getUserName(),
++                            txtEarlyAccess,
++                        ),
++                    )
+                     if modelInfo["modelVersions"][0]["files"] == []:
+                         drpdwn =  gr.Dropdown.update(choices=[], value=None)
+                         grTxtSaveFilename = gr.Textbox.update(value="")
+@@ -909,16 +927,6 @@ class Components():
+                             primary, model_version
+                         )
+                         grTxtSaveFilename = gr.Textbox.update(value=filename)
+-                        txtEarlyAccess = self.Civitai.getSelectedVersionEarlyAccessDeadline()
+-                        grHtmlModelName = gr.HTML.update(
+-                            value=self.Civitai.modelNameTitleHtml(
+-                                self.Civitai.getSelectedModelName(),
+-                                self.Civitai.getSelectedVersionName(),
+-                                self.Civitai.getSelectedVersionBaseModel(),
+-                                self.Civitai.getUserName(),
+-                                txtEarlyAccess,
+-                            ),
+-                        )
+ 
+                     return (
+                         gr.HTML.update(value=modelInfo["html"]),
+@@ -942,7 +950,7 @@ class Components():
+                         gr.Textbox.update(value=None),
+                         gr.HTML.update(value=None),
+                     )
+-            grRadioVersions.change(
++            grRadioVersionsChange = grRadioVersions.change(
+                 fn=update_model_info,
+                 inputs=[grRadioVersions, grChkbxgrpLevel],
+                 outputs=[
+@@ -1026,14 +1034,15 @@ class Components():
+                 outputs=[
+                     grTxtDlUrl,
+                     grTxtHash,
+-                    # grBtnSaveText,
+                     grBtnSaveImages,
+                     grBtnDownloadModel,
+                     grTextProgress,
+                     grTxtSaveFilename,
+                 ],
+             ).then(
+-                fn=checkEarlyAccess, inputs=[grTxtEarlyAccess], outputs=[grTextProgress]
++                fn=checkEarlyAccess,
++                inputs=[grTxtEarlyAccess],
++                outputs=[grTextProgress],
+             )
+ 
+             def file_exist_check(grTxtSaveFolder, grDrpdwnSelectFile):
+@@ -1057,6 +1066,26 @@ class Components():
+                         grMrkdwnFileMessage
+                         ]
+                 )
++            grRadioVersionsChange.then(
++                fn=updateDlUrl,
++                inputs=[grDrpdwnSelectFile],
++                outputs=[
++                    grTxtDlUrl,
++                    grTxtHash,
++                    grBtnSaveImages,
++                    grBtnDownloadModel,
++                    grTextProgress,
++                    grTxtSaveFilename,
++                ],
++            ).then(
++                fn=checkEarlyAccess,
++                inputs=[grTxtEarlyAccess],
++                outputs=[grTextProgress],
++            ).then(
++                fn=file_exist_check,
++                inputs=[grTxtSaveFolder, grDrpdwnSelectFile],
++                outputs=[grMrkdwnFileMessage],
++            )
+ 
+             def update_next_page(grChkboxShowNsfw, grChkbxgrpLevel, isNext=True):
+                 url = self.Civitai.nextPage() if isNext else self.Civitai.prevPage()
+@@ -1284,6 +1313,25 @@ class Components():
+                     grTxtCreator,
+                     grTxtVersionInfo,
+                 ],
++            ).then(
++                fn=updateDlUrl,
++                inputs=[grDrpdwnSelectFile],
++                outputs=[
++                    grTxtDlUrl,
++                    grTxtHash,
++                    grBtnSaveImages,
++                    grBtnDownloadModel,
++                    grTextProgress,
++                    grTxtSaveFilename,
++                ],
++            ).then(
++                fn=checkEarlyAccess,
++                inputs=[grTxtEarlyAccess],
++                outputs=[grTextProgress],
++            ).then(
++                fn=file_exist_check,
++                inputs=[grTxtSaveFolder, grDrpdwnSelectFile],
++                outputs=[grMrkdwnFileMessage],
+             ).then(
+                 _js=f'(x) => {{civsfz_scroll_and_color("#civsfz_model-data{self.id}", "#civsfz_versionlist{self.id}", x);}}',
+                 fn=None,
+@@ -1298,21 +1346,12 @@ class Components():
  
      def compAnchorNav(self):
          value = (
@@ -813,10 +927,10 @@ index 84d2d60..0398295 100644
          )
          grHtmlAnchorNav = gr.HTML(
 diff --git a/style.css b/style.css
-index 992f93e..3a89f3c 100644
+index 992f93e..32d40b0 100644
 --- a/style.css
 +++ b/style.css
-@@ -1,281 +1,748 @@
+@@ -1,281 +1,817 @@
 -
  .civsfz-custom-property {
 -	--civsfz-shadow-color-default: hsl(225, 15%, 30% , 0.7);
@@ -853,6 +967,8 @@ index 992f93e..3a89f3c 100644
  }
  
 -.civsfz-modellist {
+-	display: flex;
+-	flex-wrap: wrap;
 +#civsfz_tab-element .civsfz-tabbar:first-child {
 +	position: sticky;
 +	top: 0;
@@ -945,32 +1061,33 @@ index 992f93e..3a89f3c 100644
 +}
 +
 +[id^="civsfz_model-navigation"] .civsfz-navigation-buttons {
-+	position: sticky;
-+	top: 3rem;
++	position: static;
 +	z-index: 5;
 +	display: grid;
 +	grid-template-columns: minmax(13rem, 2.6fr) repeat(2, minmax(8rem, 1fr)) minmax(5rem, auto);
 +	gap: 0.75rem;
-+	align-items: center;
++	align-items: stretch;
 +	padding: 0.8rem;
 +}
 +
 +[id^="civsfz_model-navigation"] .civsfz-card-grid-row {
 +	margin-top: 0.75rem;
-+}
-+
+ }
+ 
+-.civsfz-modellist figure {
+-	margin: 4px;
+-	transition: transform .3s ease-out;
 +[id^="civsfz_model-navigation"] .civsfz-card-grid-host {
 +	width: 100%;
 +}
 +
 +[id^="civsfz_model-navigation"] .civsfz-jump-page-control {
-+	position: sticky;
-+	bottom: 0;
++	position: static;
 +	z-index: 5;
 +	display: grid;
 +	grid-template-columns: minmax(0, 1fr) minmax(8rem, auto) minmax(16rem, 19rem);
 +	gap: 0.75rem;
-+	align-items: end;
++	align-items: stretch;
 +	padding: 0.8rem;
 +	margin-top: 0.8rem;
 +}
@@ -980,6 +1097,7 @@ index 992f93e..3a89f3c 100644
 +[id^="civsfz_model-data"] .civsfz-download-status textarea,
 +[id^="civsfz_model-data"] .civsfz-download-status input {
 +	min-height: var(--civsfz-control-height);
++	height: var(--civsfz-control-height);
 +	border-radius: var(--civsfz-radius-sm);
 +	text-align: center;
 +	font-weight: 700;
@@ -995,10 +1113,12 @@ index 992f93e..3a89f3c 100644
 +[id^="civsfz_model-data"] .civsfz-btn button,
 +[id^="civsfz_model-data"] button {
 +	min-height: var(--civsfz-control-height);
++	height: var(--civsfz-control-height);
 +	border-radius: var(--civsfz-radius-sm);
 +	font-weight: 700;
 +	letter-spacing: 0.01em;
 +	box-shadow: none;
++	width: 100%;
 +}
 +
 +[id^="civsfz_apicontrol"] .civsfz-btn-primary button,
@@ -1029,14 +1149,13 @@ index 992f93e..3a89f3c 100644
 +
 +[id^="civsfz_model-data"] .civsfz-anchor-shell,
 +[id^="civsfz_model-data"] .civsfz-save-buttons {
-+	position: sticky;
-+	top: 3rem;
++	position: static;
 +	z-index: 5;
 +	padding: 0.75rem;
 +}
 +
 +[id^="civsfz_model-data"] .civsfz-save-buttons {
-+	top: 7.75rem;
++	top: auto;
 +}
 +
 +[id^="civsfz_model-data"] .civsfz-detail-title-row,
@@ -1055,29 +1174,43 @@ index 992f93e..3a89f3c 100644
 +	display: grid;
 +	grid-template-columns: minmax(0, 1.4fr) minmax(14rem, 1fr);
 +	gap: 0.75rem;
-+	align-items: center;
++	align-items: stretch;
 +}
 +
 +[id^="civsfz_model-data"] .civsfz-action-button-row,
 +[id^="civsfz_model-data"] .civsfz-status-row,
 +[id^="civsfz_model-data"] .civsfz-user-management-controls {
++	display: grid !important;
++	align-items: stretch;
 +	gap: 0.75rem;
 +}
 +
++[id^="civsfz_model-data"] .civsfz-action-button-row {
++	grid-template-columns: repeat(2, minmax(0, 1fr));
++}
++
++[id^="civsfz_model-data"] .civsfz-status-row {
++	grid-template-columns: minmax(0, 1fr);
++}
++
++[id^="civsfz_model-data"] .civsfz-user-management-controls {
++	grid-template-columns: minmax(0, 1fr) repeat(3, var(--civsfz-control-height));
++}
++
 +.civsfz-anchor-stack {
- 	display: flex;
- 	flex-wrap: wrap;
++	display: grid;
++	grid-template-columns: repeat(auto-fit, minmax(8.75rem, 1fr));
 +	gap: 0.55rem;
- }
- 
--.civsfz-modellist figure {
--	margin: 4px;
--	transition: transform .3s ease-out;
++}
++
 +.civsfz-anchor-link {
 +	display: inline-flex;
 +	align-items: center;
++	justify-content: space-between;
 +	gap: 0.5rem;
 +	padding: 0.55rem 0.8rem;
++	min-height: var(--civsfz-control-height);
++	height: 100%;
 +	border-radius: 999px;
 +	border: 1px solid rgba(171, 186, 214, 0.14);
 +	background: rgba(25, 31, 42, 0.88);
@@ -1090,6 +1223,51 @@ index 992f93e..3a89f3c 100644
 +.civsfz-anchor-link strong {
 +	font-size: 0.95rem;
 +	color: rgba(193, 212, 255, 0.9);
++}
++
++[id^="civsfz_model-navigation"] .civsfz-navigation-buttons > div,
++[id^="civsfz_model-navigation"] .civsfz-jump-page-control > div,
++[id^="civsfz_model-data"] .civsfz-save-grid > div,
++[id^="civsfz_model-data"] .civsfz-save-path-row > div,
++[id^="civsfz_model-data"] .civsfz-download-meta-row > div,
++[id^="civsfz_model-data"] .civsfz-prompt-row > div,
++[id^="civsfz_model-data"] .civsfz-user-management-controls > div {
++	min-width: 0;
++}
++
++[id^="civsfz_model-data"] .tool {
++	min-width: var(--civsfz-control-height) !important;
++	width: var(--civsfz-control-height) !important;
++	padding: 0 !important;
++}
++
++[id^="civsfz_model-data"] .civsfz-save-path-row,
++[id^="civsfz_model-data"] .civsfz-download-meta-row,
++[id^="civsfz_model-data"] .civsfz-prompt-row {
++	display: grid !important;
++	align-items: stretch;
++	gap: 0.75rem;
++}
++
++[id^="civsfz_model-data"] .civsfz-save-path-row {
++	grid-template-columns: var(--civsfz-control-height) minmax(0, 1.15fr) minmax(8rem, auto) minmax(0, 1fr);
++}
++
++[id^="civsfz_model-data"] .civsfz-download-meta-row {
++	grid-template-columns: minmax(0, 1.25fr) minmax(7rem, auto) minmax(0, 0.8fr) minmax(0, 0.9fr);
++}
++
++[id^="civsfz_model-data"] .civsfz-prompt-row {
++	grid-template-columns: repeat(2, var(--civsfz-control-height)) minmax(0, 1fr);
++}
++
++[id^="civsfz_model-data"] .civsfz-save-path-row input,
++[id^="civsfz_model-data"] .civsfz-save-path-row textarea,
++[id^="civsfz_model-data"] .civsfz-download-meta-row input,
++[id^="civsfz_model-data"] .civsfz-download-meta-row textarea,
++[id^="civsfz_model-data"] .civsfz-prompt-row input,
++[id^="civsfz_model-data"] .civsfz-prompt-row textarea {
++	min-height: var(--civsfz-control-height);
 +}
 +
 +.civsfz-title-card {
@@ -1525,18 +1703,15 @@ index 992f93e..3a89f3c 100644
 +	border: 1px solid var(--civsfz-line);
 +	border-radius: 16px;
 +	background: var(--civsfz-panel-bg-soft);
- }
--.civsfz-sticky-parent {
--	display: initial;
++}
 +
 +.civsfz-info-permissions h3,
 +.civsfz-info-section h2,
 +.civsfz-info-block h3 {
 +	margin: 0 0 0.65rem;
  }
--.civsfz-sticky-element {
--	backdrop-filter: brightness(0.35);
--	padding: 0.5em 0;
+-.civsfz-sticky-parent {
+-	display: initial;
 +
 +.civsfz-info-section-head {
 +	display: flex;
@@ -1545,19 +1720,33 @@ index 992f93e..3a89f3c 100644
 +	justify-content: space-between;
 +	gap: 0.65rem 1rem;
 +	margin-bottom: 0.9rem;
-+}
+ }
+-.civsfz-sticky-element {
+-	backdrop-filter: brightness(0.35);
+-	padding: 0.5em 0;
 +
 +.civsfz-info-section-head p,
 +.civsfz-info-permissions p {
 +	margin: 0;
 +	color: var(--civsfz-text-muted);
-+}
+ }
+-/*https: //github.com/gradio-app/gradio/issues/3337#issuecomment-1449589285*/
+-.civsfz-small-buttons {
+-	margin: 1.2em 0em 0.55em 0em !important;
+-	max-width: 2.5em;
+-	min-width: 2.5em !important;
+-	height: 2.4em;
 +
 +.civsfz-model-overview {
 +	display: grid;
 +	grid-template-columns: repeat(2, minmax(0, 1fr));
 +	gap: 0.9rem;
-+}
+ }
+-.civsfz-small-buttons2 {
+-	margin: 0em 0em 0.0em 0em !important;
+-	max-width: 2.5em;
+-	min-width: 2.5em !important;
+-	height: 2.4em;
 +
 +.civsfz-info-block {
 +	padding: 0.95rem;
@@ -1618,23 +1807,12 @@ index 992f93e..3a89f3c 100644
 +.civsfz-richtext,
 +.civsfz-sample-meta {
 +	overflow-wrap: anywhere;
- }
--/*https: //github.com/gradio-app/gradio/issues/3337#issuecomment-1449589285*/
--.civsfz-small-buttons {
--	margin: 1.2em 0em 0.55em 0em !important;
--	max-width: 2.5em;
--	min-width: 2.5em !important;
--	height: 2.4em;
++}
 +
 +.civsfz-richtext > :first-child,
 +.civsfz-sample-meta > :first-child {
 +	margin-top: 0;
- }
--.civsfz-small-buttons2 {
--	margin: 0em 0em 0.0em 0em !important;
--	max-width: 2.5em;
--	min-width: 2.5em !important;
--	height: 2.4em;
++}
 +
 +.sampleimgs {
 +	display: grid;
@@ -1711,9 +1889,7 @@ index 992f93e..3a89f3c 100644
 +	background: rgba(18, 24, 34, 0.88);
 +	border: 1px solid rgba(171, 186, 214, 0.1) !important;
 +	padding: 0.4rem 0.55rem;
- }
--.civsfz-tooltip:hover .civsfz-tooltiptext {
--	visibility: visible;
++}
 +
 +@media (max-width: 1380px) {
 +	.civsfz-workspace {
@@ -1726,12 +1902,21 @@ index 992f93e..3a89f3c 100644
 +	[id^="civsfz_model-navigation"] .civsfz-jump-page-control {
 +		position: static;
 +	}
-+}
++
++	[id^="civsfz_model-data"] .civsfz-save-path-row,
++	[id^="civsfz_model-data"] .civsfz-download-meta-row {
++		grid-template-columns: 1fr;
++	}
+ }
+-.civsfz-tooltip:hover .civsfz-tooltiptext {
+-	visibility: visible;
 +
 +@media (max-width: 980px) {
 +	[id^="civsfz_model-navigation"] .civsfz-navigation-buttons,
 +	[id^="civsfz_model-navigation"] .civsfz-jump-page-control,
 +	[id^="civsfz_model-data"] .civsfz-save-grid,
++	[id^="civsfz_model-data"] .civsfz-user-management-controls,
++	[id^="civsfz_model-data"] .civsfz-prompt-row,
 +	.civsfz-info-hero,
 +	.civsfz-model-overview,
 +	.civsfz-sample-card {

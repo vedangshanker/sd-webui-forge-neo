@@ -1835,3 +1835,54 @@ div.xyz_entries button.secondary {
 #swap_axes button {
     border-radius: 8px;
 }
+
+/* layout normalization for Forge screens */
+
+.gradio-container .form > *,
+.gradio-container .gradio-row > *,
+.gradio-container .column > * {
+    min-width: 0;
+}
+
+.gradio-container button,
+.gradio-container .tab-nav button,
+button.custom-button,
+#quicksettings > button {
+    min-height: 2.85rem;
+    align-items: center;
+    justify-content: center;
+    white-space: normal;
+}
+
+#quicksettings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: stretch;
+}
+
+#quicksettings > div,
+#quicksettings > button {
+    align-self: stretch;
+}
+
+#quicksettings > div .wrap,
+#quicksettings > div input,
+#quicksettings > div textarea,
+#quicksettings > div button,
+#quicksettings > button {
+    min-height: 2.85rem;
+}
+
+#txt2img_tools,
+#img2img_tools,
+#txt2img_actions_column,
+#img2img_actions_column {
+    flex-wrap: wrap;
+    align-items: stretch;
+}
+
+#txt2img_actions_column > *,
+#img2img_actions_column > * {
+    min-width: 0;
+}

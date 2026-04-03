@@ -14,19 +14,20 @@ clone_at_commit() {
     local repo_url="$1"
     local commit_sha="$2"
     local target_dir="$3"
+    local branch_name="${4:-pinned-${commit_sha:0:7}}"
 
     rm -rf "$target_dir"
     git clone --filter=blob:none "$repo_url" "$target_dir"
     git -C "$target_dir" fetch --depth 1 origin "$commit_sha"
-    git -C "$target_dir" checkout --detach "$commit_sha"
+    git -C "$target_dir" checkout -B "$branch_name" "$commit_sha"
 }
 
 mkdir -p "$EXT_DIR" "$SEED_DIR"
 
-clone_at_commit "$CIVBROWSER_REPO" "$CIVBROWSER_COMMIT" "$EXT_DIR/sd-webui-civbrowser"
+clone_at_commit "$CIVBROWSER_REPO" "$CIVBROWSER_COMMIT" "$EXT_DIR/sd-webui-civbrowser" "pinned-civbrowser"
 git -C "$EXT_DIR/sd-webui-civbrowser" apply --ignore-whitespace --whitespace=nowarn "$APP_DIR/runpod/patches/sd-webui-civbrowser.patch"
 
-clone_at_commit "$CIVITAI_LINK_REPO" "$CIVITAI_LINK_COMMIT" "$EXT_DIR/sd_civitai_extension"
+clone_at_commit "$CIVITAI_LINK_REPO" "$CIVITAI_LINK_COMMIT" "$EXT_DIR/sd_civitai_extension" "pinned-civitai-link"
 
 rm -rf "$SEED_DIR"
 mkdir -p "$SEED_DIR"
